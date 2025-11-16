@@ -1643,27 +1643,28 @@ bool computeRange(range_t *rho, const ephem_t *eph, const ionoutc_t *ionoutc, co
     subVect(los, pos, &(receiver_states[1]));
     tau = normVect(los)/SPEED_OF_LIGHT;
 
-    // TODO: check if this extrapolation step is right, maybe it is because receiver algorithm has estimating the GNSS satellite position based on the measured travel time?
-    // Extrapolate the satellite position backwards to the transmission time.
-    pos[0] -= vel[0]*tau;
-    pos[1] -= vel[1]*tau;
-    pos[2] -= vel[2]*tau;
+    // Iterate to find the precise transmission time.
+    double tau_prev = tau;
+    for (uint8_t i = 0; i < 10; i++)
+        {
+            gpstime_t g_tx = incGpsTime(g, -tau_prev);
+            satpos(*eph, g_tx, pos, vel, clk);
+            subVect(los, pos, &(receiver_states[1]));
+            double theta = OMEGA_EARTH * tau_prev;
+            double c_theta = cos(theta);
+            double s_theta = sin(theta);
+            xrot = pos[0] * c_theta + pos[1] * s_theta;
+            yrot = pos[1] * c_theta - pos[0] * s_theta;
+            pos[0] = xrot;
+            pos[1] = yrot;
+            subVect(los, pos, &(receiver_states[1]));
+            tau = normVect(los) / SPEED_OF_LIGHT;
 
-    // Earth rotation correction. The change in velocity can be neglected.
-    double theta = OMEGA_EARTH * tau;
-    double c_theta = cos(theta);
-    double s_theta = sin(theta);
-    // xrot = pos[0] + pos[1]*OMEGA_EARTH*tau;
-    // yrot = pos[1] - pos[0]*OMEGA_EARTH*tau;
-    xrot = pos[0] * c_theta + pos[1] * s_theta;
-    yrot = pos[1] * c_theta - pos[0] * s_theta;
-    pos[0] = xrot;
-    pos[1] = yrot;
+            if (fabs(tau - tau_prev) < 1e-10)
+                break;
+        }
 
-    // Update los vector
-    subVect(los, pos, &(receiver_states[1]));
-
-    // Azimuth and elevation angles. TODO: which los should be used?
+    // Azimuth and elevation angles.
     xyz2llh(&(receiver_states[1]), llh);
     ltcmat(llh, tmat);
     ecef2neu(los, tmat, neu);
@@ -1685,6 +1686,9 @@ bool computeRange(range_t *rho, const ephem_t *eph, const ionoutc_t *ionoutc, co
     double rel_vel[3];
     for (uint8_t i = 0; i < 3; i++)
         rel_vel[i] = vel[i] - receiver_states[4 + i];
+    // Rotation term
+    rel_vel[0] += -OMEGA_EARTH * los[1];
+    rel_vel[1] += OMEGA_EARTH * los[0];
     rate = dotProd(rel_vel, los) / range;
 
     // Pseudorange rate.
@@ -1712,16 +1716,20 @@ void computeCodePhase(channel_t *chan, range_t rho1, double dt)
     double rhorate;
 
     // Pseudorange rate.
-    rhorate = (rho1.range - chan->rho0.range)/dt;
-    // rhorate = rho1.rate;
+    // TODO: think if using rho0 information is correct.
+    rhorate = rho1.rate;
+    // rhorate = chan->rho0.rate;
 
     // Carrier and code frequency.
-    chan->f_carr = -rhorate/LAMBDA_L1;
-    // chan->f_carr = -rhorate / ((SPEED_OF_LIGHT - rhorate) / TX_FREQUENCY);
+    // chan->f_carr = -rhorate/LAMBDA_L1;
+    chan->f_carr = -rhorate / ((SPEED_OF_LIGHT - rhorate) / TX_FREQUENCY);
+    // const double beta = rhorate / SPEED_OF_LIGHT;
+    // chan->f_carr = (sqrt(1 - beta) / sqrt(1 + beta) - 1) * TX_FREQUENCY;  // Relativistic Doppler
     chan->f_code = CODE_FREQ + chan->f_carr * CARR_TO_CODE;
 
+    // TODO: think if using rho0 information is correct.
     // Initial code phase and data bit counters.
-    ms = ((subGpsTime(chan->rho0.g,chan->g0)+6.0) - chan->rho0.range/SPEED_OF_LIGHT)*1000.0;
+    ms = ((subGpsTime(chan->rho0.g, chan->g0) + 6.0) - chan->rho0.range / SPEED_OF_LIGHT) * 1000.0;
     // ms = ((subGpsTime(chan->rho0.g, chan->g0) + 6.0) - chan->rho0.range / (SPEED_OF_LIGHT - rhorate)) * 1000.0;
 
     ims = (int)ms;
