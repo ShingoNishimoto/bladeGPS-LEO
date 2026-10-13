@@ -1644,9 +1644,10 @@ bool computeRange(range_t *rho, const ephem_t *eph, const ionoutc_t *ionoutc, co
     tau = normVect(los)/SPEED_OF_LIGHT;
 
     // Iterate to find the precise transmission time.
-    double tau_prev = tau;
+    double tau_prev;
     for (uint8_t i = 0; i < 10; i++)
         {
+            tau_prev = tau;
             gpstime_t g_tx = incGpsTime(g, -tau_prev);
             satpos(*eph, g_tx, pos, vel, clk);
             subVect(los, pos, &(receiver_states[1]));
@@ -1660,8 +1661,11 @@ bool computeRange(range_t *rho, const ephem_t *eph, const ionoutc_t *ionoutc, co
             subVect(los, pos, &(receiver_states[1]));
             tau = normVect(los) / SPEED_OF_LIGHT;
 
-            if (fabs(tau - tau_prev) < 1e-10)
-                break;
+            if (fabs(tau - tau_prev) < 1e-12)
+                {
+                    // printf("tau converged: %d\n", +i);
+                    break;
+                }
         }
 
     // Azimuth and elevation angles.
@@ -1686,10 +1690,15 @@ bool computeRange(range_t *rho, const ephem_t *eph, const ionoutc_t *ionoutc, co
     double rel_vel[3];
     for (uint8_t i = 0; i < 3; i++)
         rel_vel[i] = vel[i] - receiver_states[4 + i];
-    // Rotation term
-    rel_vel[0] += -OMEGA_EARTH * los[1];
-    rel_vel[1] += OMEGA_EARTH * los[0];
+    // FIXME: different from what estimated at the receiver???
+    // // Rotation term
+    // rel_vel[0] += -OMEGA_EARTH * los[1];
+    // rel_vel[1] += OMEGA_EARTH * los[0];
     rate = dotProd(rel_vel, los) / range;
+    // Sagnac Doppler term
+    // double sagnac_term = OMEGA_EARTH / SPEED_OF_LIGHT * (vel[1] * receiver_states[1] + pos[1] * receiver_states[4] - vel[0] * receiver_states[2] - pos[0] * receiver_states[5]);
+    // printf("sagnac: %lf\n", sagnac_term);
+    rate += OMEGA_EARTH / SPEED_OF_LIGHT * (vel[1] * receiver_states[1] + pos[1] * receiver_states[4] - vel[0] * receiver_states[2] - pos[0] * receiver_states[5]);
 
     // Pseudorange rate.
     rho->rate = rate - SPEED_OF_LIGHT * clk[1];
@@ -1717,12 +1726,12 @@ void computeCodePhase(channel_t *chan, range_t rho1, double dt)
 
     // Pseudorange rate.
     // TODO: think if using rho0 information is correct.
-    rhorate = rho1.rate;
-    // rhorate = chan->rho0.rate;
+    rhorate = chan->rho0.rate;
+    // rhorate = rho1.rate;
 
     // Carrier and code frequency.
     // chan->f_carr = -rhorate/LAMBDA_L1;
-    chan->f_carr = -rhorate / ((SPEED_OF_LIGHT - rhorate) / TX_FREQUENCY);
+    chan->f_carr = -rhorate / (SPEED_OF_LIGHT - rhorate) * TX_FREQUENCY;
     // const double beta = rhorate / SPEED_OF_LIGHT;
     // chan->f_carr = (sqrt(1 - beta) / sqrt(1 + beta) - 1) * TX_FREQUENCY;  // Relativistic Doppler
     chan->f_code = CODE_FREQ + chan->f_carr * CARR_TO_CODE;
@@ -1731,6 +1740,7 @@ void computeCodePhase(channel_t *chan, range_t rho1, double dt)
     // Initial code phase and data bit counters.
     ms = ((subGpsTime(chan->rho0.g, chan->g0) + 6.0) - chan->rho0.range / SPEED_OF_LIGHT) * 1000.0;
     // ms = ((subGpsTime(chan->rho0.g, chan->g0) + 6.0) - chan->rho0.range / (SPEED_OF_LIGHT - rhorate)) * 1000.0;
+    // ms = ((subGpsTime(rho1.g, chan->g0) + 6.0) - rho1.range / SPEED_OF_LIGHT) * 1000.0;
 
     ims = (int)ms;
     chan->code_phase = (ms-(double)ims)*CA_SEQ_LEN; // in chip
@@ -2040,6 +2050,7 @@ int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *rec
     // TODO: think better way
     if (llh[2] > 3e8)
         {
+            // FIXME: this is not right. instant los is not accurate.
             // Check if the sc is behind of moon
             const double radius_moon_m = GetRadiusKm(moon_) * 1000;
             double los_from_moon_to_gps[3];
@@ -2378,19 +2389,19 @@ bool computeObservation(channel_t* chan, const ephem_t* eph, const env_t* env, c
     double path_loss_db = 20 * log10(4 * PI * rho.d * TX_FREQUENCY / SPEED_OF_LIGHT);
 
     // Receiver antenna gain
-    int ibs = (int)((90.0-rho.azel[1]*R2D)/5.0); // covert elevation to boresight
+    int ibs = (int)((90.0 - rho.azel[1] * R2D) / 5.0); // covert elevation to boresight
     double rec_ant_gain = opt->antenna_pattern_enable ? ant_pat[ibs] : 1.0;
 
     // GPS Tx antenna gain
     const int8_t boresight_tx_gain_db = gps_sats[chan->sat_id].antenna_gain[0][0];
     // Normalize it to avoid the over range
     const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - boresight_tx_gain_db) / 10.0) : 1.0;
-    static const uint8_t required_CN0 = 18;
+    static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
     static const double boltzmann_const = 228.6;
-    static const double rx_GT = -24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
-    static const double boresight_EIRP_and_other_loss = 35 - 3;
-    static const double rx_antenna_gain = 15;  // Assume for this computation.
-    double rx_CN0 = boresight_EIRP_and_other_loss + (chan->tx_antenna_gain - boresight_tx_gain_db) + rx_antenna_gain - path_loss_db + rx_GT + boltzmann_const;
+    static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
+    static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
+    static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
+    double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const;
     if (!opt->antenna_pattern_enable)
         {
 #ifndef NO_LOG_OUT

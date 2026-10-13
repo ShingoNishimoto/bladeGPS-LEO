@@ -55,6 +55,7 @@ bladegps
 external/
 
 # csv trajectory data
+old_csv/
 *.csv
 !gps_table.csv
 
