@@ -2,8 +2,6 @@
 
 #include <time.h>
 #include <math.h>
-#include <csv.h>
-#include <libgen.h>
 #ifdef _WIN32
 // To avoid conflict between time.h and pthread.h on Windows
 #define HAVE_STRUCT_TIMESPEC
@@ -64,105 +62,35 @@
 //     {}
 // };
 
-typedef enum {
-    CSV_INT,
-    CSV_FLOAT,
-    CSV_STRING
-} CSVType;
+static char gnss_data_dir[1024] = "";
 
-typedef struct {
-    CSVType type;
-    union {
-        int i;
-        float f;
-        char *s;
-    } value;
-} CSVCell;
-
-typedef struct {
-    CSVCell **data;
-    int row;
-    int col;
-    int max_rows;
-    int max_cols;
-} CSVState;
-
-
-void free_cell(CSVCell *cell) {
-    if (cell->type == CSV_STRING) {
-        free(cell->value.s);
-    }
+void SetGnssDataDir(const char* dir)
+{
+    snprintf(gnss_data_dir, sizeof(gnss_data_dir), "%s", dir);
 }
 
+// Priority: SetGnssDataDir() (-D option) > BLADEGPS_DATA_DIR env > GNSS_DATA_DIR at build time > ./gnss
+static const char* get_gnss_data_dir(void)
+{
+    if (gnss_data_dir[0] != '\0')
+        return gnss_data_dir;
 
-void field_cb(void *s, size_t len, void *data_) {
-    CSVState *state = (CSVState *)data_;
+    const char* env = getenv("BLADEGPS_DATA_DIR");
+    if (env != NULL && env[0] != '\0')
+        return env;
 
-    if (state->row >= state->max_rows) {
-        state->max_rows *= 2;
-        state->data = realloc(state->data, state->max_rows * sizeof(CSVCell *));
-        for (int i = state->row; i < state->max_rows; i++) {
-            state->data[i] = NULL;
-        }
-    }
-
-    if (state->col >= state->max_cols) {
-        state->max_cols *= 2;
-        for (int i = 0; i <= state->row; i++) {
-            if (state->data[i]) {
-                state->data[i] = realloc(state->data[i], state->max_cols * sizeof(CSVCell));
-                if (!state->data[i]) {
-                    perror("realloc cols");
-                    exit(1);
-                }
-            }
-        }
-    }
-
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%.*s", (int)len, (char *)s);
-
-    // Allocate next row if needed
-    if (!state->data[state->row]) {
-        state->data[state->row] = calloc(state->max_cols, sizeof(CSVCell));
-    }
-
-    CSVCell *cell = &state->data[state->row][state->col++];
-
-    // Type inference (simple): check for '.' for float, digit-only for int, else string
-    if (strchr(buf, '.')) {
-        cell->type = CSV_FLOAT;
-        cell->value.f = strtof(buf, NULL);
-    } else if (strspn(buf, "0123456789-") == strlen(buf)) {
-        cell->type = CSV_INT;
-        cell->value.i = atoi(buf);
-    } else {
-        cell->type = CSV_STRING;
-        cell->value.s = strdup(buf);
-    }
+#ifdef GNSS_DATA_DIR
+    return GNSS_DATA_DIR;
+#else
+    return "./gnss";
+#endif
 }
 
+static FILE *open_data_file(const char *relative_path) {
+    char full_path[2048];
+    snprintf(full_path, sizeof(full_path), "%s/%s", get_gnss_data_dir(), relative_path);
 
-void row_cb(int c, void *data_) {
-    CSVState *state = (CSVState *)data_;
-    state->row++;
-    state->col = 0;
-}
-
-
-static FILE *open_csv_relative_to_source(const char *relative_path) {
-    char *file_copy = strdup(SOURCE_FILE);
-    if (!file_copy) {
-        perror("strdup");
-        return NULL;
-    }
-
-    char *dir = dirname(file_copy);
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s/%s", dir, relative_path);
-    free(file_copy);
-
-    FILE *fp = fopen(full_path, "rb");
+    FILE *fp = fopen(full_path, "r");
     if (!fp) {
         perror("fopen");
         fprintf(stderr, "Failed to open: %s\n", full_path);
@@ -170,97 +98,78 @@ static FILE *open_csv_relative_to_source(const char *relative_path) {
     return fp;
 }
 
-static int parse_csv(FILE *fp, size_t max_rows, size_t max_cols, CSVState *state) {
-    struct csv_parser parser;
-    if (csv_init(&parser, CSV_STRICT) != 0) {
-        fprintf(stderr, "csv_init failed\n");
-        return 1;
-    }
+// Split a CSV line in place. Empty fields are kept as empty strings.
+static int split_csv_line(char *line, char **fields, int max_fields) {
+    line[strcspn(line, "\r\n")] = '\0';
 
-    *state = (CSVState){ .row = 0, .col = 0, .max_rows = max_rows, .max_cols = max_cols };
-    state->data = calloc(max_rows, sizeof(CSVCell *));
-    if (!state->data) {
-        perror("calloc data");
-        return 1;
+    int n = 0;
+    char *p = line;
+    while (n < max_fields) {
+        fields[n++] = p;
+        char *comma = strchr(p, ',');
+        if (comma == NULL)
+            break;
+        *comma = '\0';
+        p = comma + 1;
     }
-    state->data[0] = calloc(max_cols, sizeof(CSVCell));
-    if (!state->data[0]) {
-        perror("calloc row 0");
-        return 1;
-    }
-
-    char buf[1024];
-    size_t bytes_read;
-    while ((bytes_read = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        if (csv_parse(&parser, buf, bytes_read, field_cb, row_cb, state) != bytes_read) {
-            fprintf(stderr, "Parse error: %s\n", csv_strerror(csv_error(&parser)));
-            return 1;
-        }
-    }
-
-    if (csv_fini(&parser, field_cb, row_cb, state) != 0) {
-        fprintf(stderr, "csv_fini error: %s\n", csv_strerror(csv_error(&parser)));
-    }
-
-    csv_free(&parser);
-    return 0;
-}
-
-static void free_csv_state(CSVState *state) {
-    for (int i = 0; i < state->max_rows; i++) {
-        if (state->data[i]) {
-            for (int j = 0; j < state->max_cols; j++) {
-                free_cell(&state->data[i][j]);
-            }
-            free(state->data[i]);
-        }
-    }
-    free(state->data);
+    return n;
 }
 
 
 uint8_t ReadGpsTable(gps_table* gps_tables) {
-    FILE *fp = open_csv_relative_to_source("gnss/gps_table.csv");
+    FILE *fp = open_data_file("gps_table.csv");
     if (!fp) return 1;
 
-    CSVState state;
-    if (parse_csv(fp, MAX_SAT, 5, &state)) {
-        fclose(fp);
-        return 1;
+    char line[1024];
+    char *fields[5];
+    int row = 0;
+    int i = 0;
+    while (i < MAX_SAT && fgets(line, sizeof(line), fp) != NULL) {
+        if (row++ == 0) continue; // header: PRN,SVN,blockName,LM_File,ACE_File
+        if (split_csv_line(line, fields, 5) < 5) continue;
+
+        gps_tables[i].PRN = atoi(fields[0]);
+        gps_tables[i].SVN = atoi(fields[1]);
+        gps_tables[i].block_name = strdup(fields[2]);
+        gps_tables[i].antenna_file_name = strdup(fields[4]);
+        i++;
     }
     fclose(fp);
 
-    for (int i = 1; i < state.row; i++) {
-        gps_tables[i - 1].PRN = state.data[i][0].value.i;
-        gps_tables[i - 1].SVN = state.data[i][1].value.i;
-        gps_tables[i - 1].block_name = strdup(state.data[i][2].value.s);
-        gps_tables[i - 1].antenna_file_name = strdup(state.data[i][4].value.s);
+    if (i < MAX_SAT) {
+        fprintf(stderr, "GPS table has only %d satellites.\n", i);
+        return 1;
     }
-
-    free_csv_state(&state);
     return 0;
 }
 
 uint8_t ReadGpsAntennaGain(gps_satellite* gps_sat) {
     char rel_path[512];
-    snprintf(rel_path, sizeof(rel_path), "gnss/antenna/%s.txt", gps_sat->sat_info.antenna_file_name);
-    FILE *fp = open_csv_relative_to_source(rel_path);
+    snprintf(rel_path, sizeof(rel_path), "antenna/%s.txt", gps_sat->sat_info.antenna_file_name);
+    FILE *fp = open_data_file(rel_path);
     if (!fp) return 1;
 
-    CSVState state;
-    if (parse_csv(fp, ANT_ELE_NUM + 1, ANT_AZI_NUM + 1, &state)) {
-        fclose(fp);
-        return 1;
+    // Row: zenith (off-boresight) angle 0-90 deg, column: azimuth 0-359 deg.
+    char *line = NULL;
+    size_t cap = 0;
+    char *fields[ANT_AZI_NUM + 1];
+    int row = 0;
+    int i = 0;
+    while (i < ANT_ELE_NUM && getline(&line, &cap, fp) != -1) {
+        if (row++ == 0) continue; // header: azimuth angles
+        int n = split_csv_line(line, fields, ANT_AZI_NUM + 1);
+        for (int j = 1; j < n; j++) {
+            gps_sat->antenna_gain[i][j - 1] = strtod(fields[j], NULL);
+        }
+        i++;
     }
+    free(line);
     fclose(fp);
 
-    for (int i = 1; i < state.max_rows; i++) {
-        for (int j = 1; j < state.max_cols; j++) {
-            gps_sat->antenna_gain[i - 1][j - 1] = state.data[i][j].value.f;
-        }
+    if (i < ANT_ELE_NUM) {
+        fprintf(stderr, "Antenna pattern %s has only %d rows.\n", rel_path, i);
+        return 1;
     }
-
-    free_csv_state(&state);
     return 0;
 }
 
@@ -269,11 +178,13 @@ uint8_t ReadGpsAntennaGain(gps_satellite* gps_sat) {
 uint8_t InitGPSSatellite(gps_satellite* gps_sats)
 {
     gps_table gps_tables[MAX_SAT];
-    ReadGpsTable(gps_tables);
+    if (ReadGpsTable(gps_tables))
+        return 1;
     for (int i = 0; i < MAX_SAT; i++)
         {
             gps_sats[i].sat_info = gps_tables[i];
-            ReadGpsAntennaGain(&gps_sats[i]);
+            if (ReadGpsAntennaGain(&gps_sats[i]))
+                return 1;
         }
 
     return 0;
