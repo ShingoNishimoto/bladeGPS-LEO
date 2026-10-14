@@ -21,9 +21,12 @@ RUN git clone https://github.com/Nuand/bladeRF.git /opt/bladeRF \
     && cmake .. \
     && make
 
-RUN git clone https://github.com/osqzss/bladeGPS.git /opt/bladeGPS \
-    && cd /opt/bladeGPS \
-    && make
+# Build context is the repository root: docker build -f docker/Dockerfile -t bladegps .
+COPY --chown=bladegps:bladegps . /opt/bladeGPS
+RUN cd /opt/bladeGPS \
+    && make clean \
+    && make BLADERF_CFLAGS=-I/opt/bladeRF/host/libraries/libbladeRF/include \
+            BLADERF_LIBS="-L/opt/bladeRF/host/build/output -lbladeRF"
 
 ENV PATH="/opt/bladeGPS:${PATH}"
 

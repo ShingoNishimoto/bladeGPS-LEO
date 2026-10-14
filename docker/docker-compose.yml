@@ -3,7 +3,8 @@ version: "3.7"
 services:
   bladegps:
     build:
-      context: .
+      context: ..
+      dockerfile: docker/Dockerfile
     cap_add:
     - ALL
     command: bladegps -e /opt/bladeGPS/brdc3300.18n -l 35.274,137.014,100 -d 86400
