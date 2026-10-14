@@ -303,7 +303,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.opt.antenna_pattern_enable = true;
 	s.opt.path_loss_enable = TRUE;
 	s.opt.rec_ant_dir[0] = 0.0;
-	s.opt.rec_ant_dir[0] = 90.0 *D2R;
+	s.opt.rec_ant_dir[1] = 90.0 *D2R;
 	option_t opt2 = s.opt;
 	s.ch2_enable = false;
 	s.fast_mode = false;

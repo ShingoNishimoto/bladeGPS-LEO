@@ -58,6 +58,7 @@ external/
 old_csv/
 *.csv
 !gps_table.csv
+!csv/leo_full_states_eci.csv
 
 # Ephemeris data
 *.24n
