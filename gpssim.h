@@ -212,5 +212,10 @@ typedef struct
 } channel_t;
 
 void date2gps(const datetime_t *t, gpstime_t *g);
+gpstime_t incGpsTime(gpstime_t g0, double dt);
+double subGpsTime(gpstime_t g1, gpstime_t g0);
+void gps2date(const gpstime_t *g, datetime_t *t);
+void utc2gps(const datetime_t *t, gpstime_t *g);
+void gps2utc(const gpstime_t *g, datetime_t *t);
 
 #endif

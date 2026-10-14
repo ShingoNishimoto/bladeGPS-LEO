@@ -208,8 +208,8 @@ void usage(void)
 		"  -g <nmea_gga>    NMEA GGA stream (dynamic mode)\n"
 		"  -l <location>    Lat,Lon,Hgt (static mode) e.g. 35.274,137.014,100\n"
 		"  -L <location>    Lat,Lon,Hgt (static mode) of Ch2 e.g. 35.274,137.014,100\n"
-		"  -t <date,time>   Scenario start time YYYY/MM/DD,hh:mm:ss\n"
-		"  -T <date,time>   Overwrite TOC and TOE to scenario start time\n"
+		"  -t <date,time>   Scenario start time in UTC YYYY/MM/DD,hh:mm:ss\n"
+		"  -T <date,time>   Overwrite TOC and TOE to scenario start time in UTC (or 'now')\n"
 		"  -d <duration>    Duration [sec] (max: %.0f)\n"
 		"  -x <XB number>   Enable expansion board, e.g. '-x 200' for XB200\n"
 		"  -b <devstr>      bladeRF device string (standalone use, default: first device)\n"
@@ -374,7 +374,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 				t0.mm = gmt->tm_min;
 				t0.sec = (double)gmt->tm_sec;
 
-				date2gps(&t0, &s.opt.g0);
+				utc2gps(&t0, &s.opt.g0);
 
 				break;
 			}
@@ -387,7 +387,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 				exit(1);
 			}
 			t0.sec = floor(t0.sec);
-			date2gps(&t0, &s.opt.g0);
+			utc2gps(&t0, &s.opt.g0);
 			break;
 		case 'd':
 			duration = atof(optarg);

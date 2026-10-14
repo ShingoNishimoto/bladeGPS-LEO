@@ -215,123 +215,83 @@ static int leap_seconds(int year, int month, int day)
     return ls;
 }
 
-/*! \brief Convert a UTC date into a GPS date
- *  \param[in] t input date in UTC form
+/*! \brief Convert a calendar date in GPS time scale into a GPS time (no leap seconds)
+ *  \param[in] t input date in GPS time scale (e.g. RINEX navigation epoch)
  *  \param[out] g output date in GPS form
  */
 void date2gps(const datetime_t *t, gpstime_t *g)
 {
-    // int doy[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
-    // int ye;
-    // int de;
-    // int lpdays;
-
-    // ye = t->y - 1980;
-
-    // // Compute the number of leap days since Jan 5/Jan 6, 1980.
-    // lpdays = ye/4 + 1;
-    // if ((ye%4)==0 && t->m<=2)
-    //     lpdays--;
-
-    // // Compute the number of days elapsed since Jan 5/Jan 6, 1980.
-    // de = ye*365 + doy[t->m-1] + t->d + lpdays - 6;
-
-    // // Convert time to GPS weeks and seconds.
-    // g->week = de / 7;
-    // g->sec = (double)(de%7)*SECONDS_IN_DAY + t->hh*SECONDS_IN_HOUR
-    //     + t->mm*SECONDS_IN_MINUTE + t->sec + SECONDS_UTC_TO_GPS;
-
-    // return;
-
     int Y = t->y;
     int M = t->m;
-    int D = t->d;
     if(M <= 2) { Y -= 1; M += 12; }
-
-    double day_frac = D + (t->hh/24.0) + (t->mm/1440.0) + (t->sec/86400.0);
 
     int A = Y/100;
     int B = 2 - A + A/4;
 
-    double JD_utc = floor(365.25*(Y+4716)) + floor(30.6001*(M+1)) + day_frac + B - 1524.5;
+    // Julian day number at 00:00 of the date minus that of the GPS epoch 1980/01/06 00:00
+    long jdn = (long)floor(365.25*(Y+4716)) + (long)floor(30.6001*(M+1)) + t->d + B - 1524; // JD + 0.5
+    long days = jdn - 2444245L;
 
-    double JD_gps_epoch = 2444244.5; // 1980-01-06 00:00:00 UTC
+    double gps_sec = (double)days * SECONDS_IN_DAY
+                   + t->hh*SECONDS_IN_HOUR + t->mm*SECONDS_IN_MINUTE + t->sec;
 
-    // cumulative leap seconds
-    int ls = leap_seconds(t->y, t->m, t->d);
-
-    // GPS seconds = (JD - JD_gps) * 86400 + (TAI-UTC -19)
-    double gps_sec = (JD_utc - JD_gps_epoch) * SECONDS_IN_DAY + ls - 19;
-
-    g->week = (int)(gps_sec / 604800.0);
-    g->sec  = fmod(gps_sec, 604800.0);
+    g->week = (int)floor(gps_sec / 604800.0);
+    g->sec  = gps_sec - g->week * 604800.0;
 }
 
+/*! \brief Convert a GPS time into a calendar date in GPS time scale (no leap seconds)
+ *  \param[in] g input date in GPS form
+ *  \param[out] t output date in GPS time scale
+ */
 void gps2date(const gpstime_t *g, datetime_t *t)
 {
-    // long c,d,e,f;
-    // double gsec = round(g->sec - SECONDS_UTC_TO_GPS);
-
-    // // Convert Julian day number to calendar date
-    // c = (long)(7.0*(double)g->week + floor(gsec/86400.0)+2444245.0) + 1537;
-    // d = (long)(((double)c-122.1)/365.25);
-    // e = 365*d + d/4;
-    // f = (long)((double)(c-e)/30.6001 );
-
-    // t->d = c - e - (int)(30.6001*f);
-    // t->m = f - 1 - 12*(f/14);
-    // t->y  = d - 4715 - ((7 + t->m)/10);
-
-    // t->hh = ((int)(gsec/3600.0))%24;
-    // t->mm = ((int)(gsec/60.0))%60;
-    // t->sec = gsec - 60.0*floor(gsec/60.0);
-
-    // return;
-
     double gps_sec = g->week*604800.0 + g->sec;
+    long days = (long)floor(gps_sec / SECONDS_IN_DAY);
+    double sod = gps_sec - days * SECONDS_IN_DAY;
 
-    // GPS -> TAI
-    double tai_sec = gps_sec + 19.0;
+    // Julian day number to calendar date
+    double Z = (double)(days + 2444245L);
+    double alpha = floor((Z - 1867216.25)/36524.25);
+    double A = Z + 1 + alpha - floor(alpha/4.0);
+    double B = A + 1524;
+    double C = floor((B - 122.1)/365.25);
+    double D = floor(365.25*C);
+    double E = floor((B - D)/30.6001);
 
-    // Initial approximation: UTC = TAI - cumulative leap seconds
-    double utc_sec = tai_sec; // will subtract leap seconds iteratively
+    t->d = (int)(B - D - floor(30.6001*E));
+    t->m = (int)(E < 14 ? E - 1 : E - 13);
+    t->y = (int)(t->m > 2 ? C - 4716 : C - 4715);
 
-    int done = 0;
+    t->hh = (int)(sod / SECONDS_IN_HOUR);
+    t->mm = (int)((sod - t->hh*SECONDS_IN_HOUR) / SECONDS_IN_MINUTE);
+    t->sec = sod - t->hh*SECONDS_IN_HOUR - t->mm*SECONDS_IN_MINUTE;
+}
+
+/*! \brief Convert a UTC date into a GPS time
+ *  \param[in] t input date in UTC
+ *  \param[out] g output date in GPS form
+ */
+void utc2gps(const datetime_t *t, gpstime_t *g)
+{
+    date2gps(t, g);
+    *g = incGpsTime(*g, (double)leap_seconds(t->y, t->m, t->d)); // GPS - UTC
+}
+
+/*! \brief Convert a GPS time into a UTC date
+ *  \param[in] g input date in GPS form
+ *  \param[out] t output date in UTC
+ */
+void gps2utc(const gpstime_t *g, datetime_t *t)
+{
     int ls = 0;
-    while(!done) {
-        // Convert seconds since GPS epoch to Julian Day
-        double jd = 2444244.5 + (utc_sec / SECONDS_IN_DAY);
-
-        // Convert JD to calendar date
-        double Z = floor(jd + 0.5);
-        double F = jd + 0.5 - Z;
-
-        double alpha = floor((Z - 1867216.25)/36524.25);
-        double A = Z + 1 + alpha - floor(alpha/4.0);
-        double B = A + 1524;
-        double C = floor((B - 122.1)/365.25);
-        double D = floor(365.25*C);
-        double E = floor((B - D)/30.6001);
-
-        t->d = (int)(B - D - floor(30.6001*E) + F);
-        t->m = (int)(E < 14 ? E - 1 : E - 13);
-        t->y = (int)(t->m > 2 ? C - 4716 : C - 4715);
-
-        // Compute HH:MM:SS
-        double day_frac = F;
-        t->hh = (int)(day_frac * 24.0);
-        t->mm = (int)((day_frac*24.0 - t->hh)*60.0);
-        t->sec = ((day_frac*24.0 - t->hh)*60.0 - t->mm)*60.0;
-
-        // Check leap seconds for this date
+    for (int i = 0; i < 3; i++)
+    {
+        gpstime_t gutc = incGpsTime(*g, -(double)ls);
+        gps2date(&gutc, t);
         int new_ls = leap_seconds(t->y, t->m, t->d);
-        if(new_ls == ls) {
-            done = 1;
-        } else {
-            // adjust UTC seconds
-            utc_sec = tai_sec - new_ls;
-            ls = new_ls;
-        }
+        if (new_ls == ls)
+            break;
+        ls = new_ls;
     }
 }
 
@@ -2851,7 +2811,8 @@ void *gps_task(void *arg)
         t0 = tmin;
     }
 
-    printf("Start time = %4d/%02d/%02d,%02d:%02d:%02.0f (%d:%.0f)\n",
+    gps2utc(&g0, &t0);
+    printf("Start time = %4d/%02d/%02d,%02d:%02d:%02.0f UTC (GPS week %d, TOW %.0f)\n",
         t0.y, t0.m, t0.d, t0.hh, t0.mm, t0.sec, g0.week, g0.sec);
     printf("Duration = %.1f [sec]\n", ((double)numd)/10.0);
 
@@ -3190,8 +3151,8 @@ void *gps_task(void *arg)
                 (s->fast_mode && igrx % 30000 == 0)))
             {
                 printf("\n");
-                gps2date(&grx, &t0);
-                printf("%4d/%02d/%02d,%02d:%02d:%02.0f (%d:%.0f)\n",
+                gps2utc(&grx, &t0);
+                printf("%4d/%02d/%02d,%02d:%02d:%02.0f UTC (%d:%.0f)\n",
                     t0.y, t0.m, t0.d, t0.hh, t0.mm, t0.sec, grx.week, grx.sec);
                 // channel 1
                 printf("channel 1\n");
