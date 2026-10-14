@@ -215,6 +215,7 @@ void usage(void)
 		"  -I               Disable ionospheric delay for spacecraft scenario\n"
 		"  -E               Equal distribution of rx and tx antenna pattern\n"
 		"  -p               Disable path loss and hold power level constant\n"
+		"  -j               User motion files are in ECI: angle[rad],x,y,z,vx,vy,vz (z-rotation by angle from ECEF)\n"
 		"  -f               Fast option, run only simulation part as fast as possible without generating IQ (no device needed).\n"
 		"  -v               Verbosity option\n",
 		((double)USER_MOTION_SIZE)/10.0,
@@ -301,7 +302,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.ch2_enable = false;
 	s.fast_mode = false;
 
-	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:b:D:iIEpfv"))!=-1)
+	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:b:D:iIEpfjv"))!=-1)
 	{
 		switch (result)
 		{
@@ -434,6 +435,10 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 			break;
 		case 'f':
 			s.fast_mode = true;
+			break;
+		case 'j':
+			s.opt.eci_input = true;
+			opt2.eci_input = true;
 			break;
 		case 'v':
 			s.opt.verb = TRUE;

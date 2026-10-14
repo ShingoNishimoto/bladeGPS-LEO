@@ -75,6 +75,7 @@ typedef struct {
 	int iono_enable;
 	int path_loss_enable;
 	bool antenna_pattern_enable;
+	bool eci_input; // user motion file is in ECI with the rotation angle in the 1st column
 	double rec_ant_dir[2]; // azimuth, elevation in llh.
 	char log_dir[MAX_CHAR];
 } option_t;

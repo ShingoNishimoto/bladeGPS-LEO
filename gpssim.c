@@ -24,6 +24,7 @@
 
 #include "gpssim.h"
 #include "bladegps.h"
+#include "eci.h"
 
 // #define NO_LOG_OUT
 #define MAX_FILENAME_LEN 1024
@@ -2200,6 +2201,13 @@ int setReceiverPosition(double** receiver_states, option_t* opt)
         else
         {
             numd = readUserMotion(receiver_states, opt->umfile);
+
+            if (opt->eci_input)
+            {
+                // Convert to ECEF with the rotation angle in the 1st column, which is kept as is.
+                for (int i = 0; i < numd; i++)
+                    eci2ecef(receiver_states[i][0], &(receiver_states[i][1]), &(receiver_states[i][1]));
+            }
         }
 
         if (numd <= 0)
@@ -2463,7 +2471,7 @@ void write_headers(FILE *vis_file, FILE *cn0_file)
     fprintf(cn0_file, "\n");
 }
 
-void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2], bool dump_user_pos[2])
+void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *eci_log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2], bool dump_user_pos[2])
 {
     const size_t log_dir_str_size = strlen(s->opt.log_dir);
     if (log_dir_str_size == 0) return;
@@ -2482,6 +2490,11 @@ void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *visibility_l
                 goto exit;
 
             fprintf(log_files[i], "t, gmst_sec, x, y, z, vx, vy, vz\n");
+
+            if (!open_log_file(&eci_log_files[i], s->opt.log_dir, "user_states_eci", suffix, "User states in ECI", i))
+                goto exit;
+
+            fprintf(eci_log_files[i], "t, theta_rad, x, y, z, vx, vy, vz\n");
         }
 
         if (!open_log_file(&visibility_log_files[i], s->opt.log_dir, "visibility", suffix, "Visibility", i))
@@ -2500,10 +2513,11 @@ exit:
 }
 
 
-void close_log_files(FILE *log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2])
+void close_log_files(FILE *log_files[2], FILE *eci_log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2])
 {
     for (uint8_t i = 0; i < 2; i++)
     {
+        if (eci_log_files[i] != NULL) fclose(eci_log_files[i]);
         if (visibility_log_files[i] != NULL) fclose(visibility_log_files[i]);
         if (cn0_log_files[i] != NULL) fclose(cn0_log_files[i]);
         if (log_files[i] != NULL) fclose(log_files[i]);
@@ -2517,6 +2531,24 @@ void log_user_position(FILE *log_file, bool enabled, double time, double *state)
 
     fprintf(log_file, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf\n",
             time, state[0], state[1], state[2], state[3], state[4], state[5], state[6]);
+}
+
+/*! \brief Log the user state in ECI */
+/*  \param[in] grx Receiver time, used for GMST when the angle is not given by the user motion file
+ *  \param[in] state User state {angle or time, x, y, z, vx, vy, vz} in ECEF
+ *  \param[in] eci_input The 1st column of the state is the ECI rotation angle
+ */
+void log_user_position_eci(FILE *log_file, bool enabled, gpstime_t grx, const double *state, bool eci_input)
+{
+    if (!enabled || log_file == NULL || state == NULL)
+        return;
+
+    const double theta = eci_input ? state[0] : gpsTimeToGmst(grx);
+    double eci[6];
+    ecef2eci(theta, &(state[1]), eci);
+
+    fprintf(log_file, "%lf,%.15f,%lf,%lf,%lf,%lf,%lf,%lf\n",
+            grx.sec, theta, eci[0], eci[1], eci[2], eci[3], eci[4], eci[5]);
 }
 
 #ifndef _WIN32
@@ -2634,11 +2666,12 @@ void *gps_task(void *arg)
 
     // Log files
     FILE *log_files[2] = {NULL, NULL};
+    FILE *eci_log_files[2] = {NULL, NULL};
     FILE *visibility_log_files[2] = {NULL, NULL};
     FILE *cn0_log_files[2] = {NULL, NULL};
     bool dump_user_pos[2] = {false, false};
 
-    initialize_log_files(s, log_files, visibility_log_files, cn0_log_files, dump_user_pos);
+    initialize_log_files(s, log_files, eci_log_files, visibility_log_files, cn0_log_files, dump_user_pos);
 
     ////////////////////////////////////////////////////////////
     // Read options
@@ -3020,8 +3053,12 @@ void *gps_task(void *arg)
 
         // Logging receiver position with gpstime.
         log_user_position(log_files[0], dump_user_pos[0], grx.sec, receiver_states[iumd]);
+        log_user_position_eci(eci_log_files[0], dump_user_pos[0], grx, receiver_states[iumd], s->opt.eci_input);
         if (s->ch2_enable)
+        {
             log_user_position(log_files[1], dump_user_pos[1], grx.sec, receiver_states2[iumd]);
+            log_user_position_eci(eci_log_files[1], dump_user_pos[1], grx, receiver_states2[iumd], s->opt2.eci_input);
+        }
 
 #ifndef NO_LOG_OUT
         // TODO: the log output is too frequent?
@@ -3202,11 +3239,11 @@ abort:
         free(receiver_states2);
     }
 
-    close_log_files(log_files, visibility_log_files, cn0_log_files);
+    close_log_files(log_files, eci_log_files, visibility_log_files, cn0_log_files);
     return (NULL);
 
 exit:
-    close_log_files(log_files, visibility_log_files, cn0_log_files);
+    close_log_files(log_files, eci_log_files, visibility_log_files, cn0_log_files);
 
     // Let the caller waiting for the initialization know the failure.
     s->gps.ready = -1;

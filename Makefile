@@ -22,7 +22,7 @@ CFLAGS += -DGNSS_DATA_DIR=\"$(GNSS_DATA_DIR)\"
 CFLAGS += -DGIT_COMMIT_ID=\"$(GIT_COMMIT_ID)\" -DGIT_COMMIT_DATE="\"$(GIT_COMMIT_DATE)\""
 LDLIBS = $(BLADERF_LIBS) -lm -lpthread
 
-OBJS = bladegps.o gpssim.o gpssatellite.o
+OBJS = bladegps.o gpssim.o gpssatellite.o eci.o
 
 bladegps: main.o $(OBJS)
 	$(CC) $^ $(LDLIBS) -o $@
