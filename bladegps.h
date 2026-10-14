@@ -19,10 +19,18 @@
 #define TX_BANDWIDTH	2500000
 #define TX_GAIN		-5
 
-// TODO: check if this parameter is okay.
-#define NUM_BUFFERS			512
-#define SAMPLES_PER_BUFFER	(16 * 1024)
-#define NUM_TRANSFERS		64
+// TX stream of libbladeRF. The queue of NUM_BUFFERS * SAMPLES_PER_BUFFER samples (0.4 s at
+// 2.6 Msps) is the latency between the signal generation and the RF output. A larger queue is
+// more robust to CPU load, e.g. make CPPFLAGS="-DNUM_BUFFERS=512 -DNUM_TRANSFERS=64".
+#ifndef NUM_BUFFERS
+#define NUM_BUFFERS			32
+#endif
+#ifndef SAMPLES_PER_BUFFER
+#define SAMPLES_PER_BUFFER	(32 * 1024)
+#endif
+#ifndef NUM_TRANSFERS
+#define NUM_TRANSFERS		16
+#endif
 #define TIMEOUT_MS			1000
 
 // #define NUM_IQ_SAMPLES  (TX_SAMPLERATE / 10)

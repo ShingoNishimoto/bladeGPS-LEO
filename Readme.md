@@ -131,7 +131,7 @@ Options:
   -T <date,time>   Overwrite TOC and TOE to scenario start time in UTC (or 'now')
   -d <duration>    Duration [sec] (max: 86400)
   -x <XB number>   Enable expansion board, e.g. '-x 200' for XB200
-  -b <devstr>      bladeRF device string (standalone use, default: first device)
+  -b <device>      bladeRF serial number (prefix) or device string, e.g. 636ee0 or *:serial=636ee0
   -D <data_dir>    Directory of gps_table.csv and antenna/ (default: $BLADEGPS_DATA_DIR or ./gnss)
   -a <tx_gain>     TX Gain (default: -5)
   -r <azi,ele>     Rx antenna attitude in degree (default: azi=0, ele=90)
@@ -149,6 +149,8 @@ Options:
 * The scenario start time must be within the RINEX navigation file (`-T` shifts the ephemerides
   to the start time instead).
 * `-j` applies to both channels.
+* `-b` selects the bladeRF when several are connected (serial numbers by `bladeRF-cli -p`).
+  Without it, the first device found is used.
 * `-a` is the bladeRF TX gain [dB] (bladeRF 2.0: -23.75 to 66). Both TX channels use the same gain.
 
 ### Signal power of each satellite
@@ -264,6 +266,13 @@ uses the sample rate already set on it (e.g. the same as a receiver on the same 
 not close it. With `dev == NULL`, bladeGPS opens the device (`-b`), sets 2.6 Msps and closes it
 on exit. This is how [gnss_sim_receiver](https://github.com/ShingoNishimoto/gnss_sim_receiver)
 runs bladeGPS together with GNSS-SDR.
+
+The TX stream of libbladeRF queues `NUM_BUFFERS` x `SAMPLES_PER_BUFFER` samples (default 32 x 32768,
+0.4 s at 2.6 Msps), which is the latency from the signal generation to the RF output. If the TX
+underruns when another heavy process (e.g. a receiver) runs on the same machine, build with a
+larger queue:
+
+    make CPPFLAGS="-DNUM_BUFFERS=512 -DNUM_TRANSFERS=64"
 
 ## Docker
 

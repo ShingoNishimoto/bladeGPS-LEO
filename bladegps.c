@@ -147,7 +147,9 @@ void *tx_task(void *arg)
 		assert(buffer_samples_remaining == 0);
 
 		// If there were no errors, transmit the data buffer.
-		bladerf_sync_tx(s->tx.dev, s->tx.buffer, SAMPLES_PER_BUFFER, NULL, TIMEOUT_MS);
+		int status = bladerf_sync_tx(s->tx.dev, s->tx.buffer, SAMPLES_PER_BUFFER, NULL, TIMEOUT_MS);
+		if (status != 0)
+			fprintf(stderr, "TX failed: %s\n", bladerf_strerror(status));
 		// TODO: what is this if sentence for?
 		if (is_fifo_write_ready(s)) {
 			/*
@@ -212,7 +214,7 @@ void usage(void)
 		"  -T <date,time>   Overwrite TOC and TOE to scenario start time in UTC (or 'now')\n"
 		"  -d <duration>    Duration [sec] (max: %.0f)\n"
 		"  -x <XB number>   Enable expansion board, e.g. '-x 200' for XB200\n"
-		"  -b <devstr>      bladeRF device string (standalone use, default: first device)\n"
+		"  -b <device>      bladeRF serial number (prefix) or device string, e.g. 636ee0 or *:serial=636ee0\n"
 		"  -D <data_dir>    Directory of gps_table.csv and antenna/ (default: $BLADEGPS_DATA_DIR or ./gnss)\n"
 		"  -a <tx_gain>     TX Gain (default: %d)\n"
 		"  -r <azi,ele>     Rx antenna attitude in degree (default: azi=0, ele=90)\n"
@@ -404,7 +406,15 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 			xb_board=atoi(optarg);
 			break;
 		case 'b':
-			devstr = optarg;
+			// A bare serial number (or its prefix) is accepted as well as a device string.
+			if (strchr(optarg, ':') == NULL)
+			{
+				static char devstr_serial[MAX_CHAR];
+				snprintf(devstr_serial, sizeof(devstr_serial), "*:serial=%s", optarg);
+				devstr = devstr_serial;
+			}
+			else
+				devstr = optarg;
 			break;
 		case 'D':
 			SetGnssDataDir(optarg);
@@ -732,6 +742,9 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 
 	// Waiting for TX task to complete.
 	pthread_join(s.tx.thread, NULL);
+
+	// The samples queued in libbladeRF are still being transmitted. Wait for them before disabling TX.
+	usleep((useconds_t)((double)NUM_BUFFERS * SAMPLES_PER_BUFFER / tx_samplerate * 1e6) + 100000);
 	printf("\nDone!\n");
 
 	// Disable TX module and shut down underlying TX stream.

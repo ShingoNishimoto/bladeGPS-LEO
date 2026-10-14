@@ -26,7 +26,7 @@ LDLIBS = $(BLADERF_LIBS) -lm -lpthread
 OBJS = bladegps.o gpssim.o gpssatellite.o eci.o
 
 # Rebuild when the build settings (data directory, commit, flags) change
-BUILD_FLAGS = $(CC) $(CFLAGS)
+BUILD_FLAGS = $(CC) $(CPPFLAGS) $(CFLAGS)
 .build_flags: FORCE
 	@echo '$(BUILD_FLAGS)' | cmp -s - $@ || echo '$(BUILD_FLAGS)' > $@
 main.o $(OBJS): .build_flags
