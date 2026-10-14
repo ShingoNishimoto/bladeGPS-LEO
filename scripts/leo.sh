@@ -5,7 +5,7 @@
 
 source "$(dirname "$0")/common.sh"
 
-# START must be the epoch the trajectory was generated for.
+# START must be the epoch (UTC) the trajectory was generated for.
 START=${START:-2024/01/15,05:00:00}
 DURATION=${DURATION:-8000}
 TRAJ=${TRAJ:-$csv_dir/leo_full_states_eci.csv}
