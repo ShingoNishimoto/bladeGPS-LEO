@@ -1,0 +1,8 @@
+# Keep the image to what is in git
+.git/
+work/
+csv/*
+!csv/leo_full_states_eci.csv
+*.o
+*.so
+bladegps

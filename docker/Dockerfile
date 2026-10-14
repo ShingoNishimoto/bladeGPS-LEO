@@ -1,33 +1,29 @@
-FROM ubuntu:20.04
+# Build context is the repository root:
+#   docker build -f docker/Dockerfile -t bladegps .
+FROM ubuntu:22.04
 
-RUN adduser --system --home /bladegps --disabled-password --group bladegps
+# bladeRF host library release (https://github.com/Nuand/bladeRF/releases)
+ARG BLADERF_VERSION=2023.02
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get -y install tzdata \
-    && apt-get -y install git libusb-1.0-0-dev libusb-1.0-0 build-essential cmake libncurses5-dev libtecla1 libtecla-dev pkg-config \
-    && chmod 775 /opt \
-    && mkdir -p /opt/bladeRF \
-    && chown -R bladegps:bladegps /opt/bladeRF \
-    && mkdir -p /opt/bladeGPS \
-    && chown -R bladegps:bladegps /opt/bladeGPS
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
+        ca-certificates git build-essential cmake pkg-config \
+        libusb-1.0-0-dev libncurses5-dev libtecla-dev libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-USER bladegps
+RUN git clone --depth 1 --branch ${BLADERF_VERSION} --recursive --shallow-submodules \
+        https://github.com/Nuand/bladeRF.git /opt/bladeRF \
+    && cmake -S /opt/bladeRF/host -B /opt/bladeRF/host/build \
+        -DCMAKE_BUILD_TYPE=Release -DINSTALL_UDEV_RULES=OFF \
+    && make -C /opt/bladeRF/host/build -j"$(nproc)" install \
+    && ldconfig
 
-ENV LD_LIBRARY_PATH=/opt/bladeRF/host/build/output
-
-RUN git clone https://github.com/Nuand/bladeRF.git /opt/bladeRF \
-    && mkdir -p /opt/bladeRF/host/build \
-    && cd /opt/bladeRF/host/build \
-    && cmake .. \
-    && make
-
-# Build context is the repository root: docker build -f docker/Dockerfile -t bladegps .
-COPY --chown=bladegps:bladegps . /opt/bladeGPS
-RUN cd /opt/bladeGPS \
-    && make clean \
-    && make BLADERF_CFLAGS=-I/opt/bladeRF/host/libraries/libbladeRF/include \
-            BLADERF_LIBS="-L/opt/bladeRF/host/build/output -lbladeRF"
+COPY . /opt/bladeGPS
+RUN make -C /opt/bladeGPS clean \
+    && make -C /opt/bladeGPS \
+    && mkdir -p /opt/bladeGPS/work \
+    && chmod 777 /opt/bladeGPS/work
 
 ENV PATH="/opt/bladeGPS:${PATH}"
-
-WORKDIR /bladegps
+ENV HOME=/tmp
+WORKDIR /opt/bladeGPS

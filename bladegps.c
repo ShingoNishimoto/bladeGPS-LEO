@@ -219,7 +219,7 @@ void usage(void)
 		"  -R <azi,ele>     Rx antenna attitude in degree of Ch2 (default: same as Ch1)\n"
 		"  -i               Interactive mode: North='%c', South='%c', East='%c', West='%c'\n"
 		"  -I               Disable ionospheric delay for spacecraft scenario\n"
-		"  -E               Equal distribution of rx and tx antenna pattern\n"
+		"  -E               Equal signal power for all satellites (no antenna patterns, drop below 18 dB-Hz)\n"
 		"  -p               Disable path loss and hold power level constant\n"
 		"  -j               User motion files are in ECI: angle[rad],x,y,z,vx,vy,vz (z-rotation by angle from ECEF)\n"
 		"  -f               Fast option, run only simulation part as fast as possible without generating IQ (no device needed).\n"

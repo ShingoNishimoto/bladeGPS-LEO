@@ -24,8 +24,7 @@ Moon occultation and other cislunar features of gnss_sim_receiver are not includ
 
 > [!WARNING]
 > Transmitting on GPS L1 over the air is illegal in most countries and can disturb GPS receivers
-> nearby. Connect the bladeRF TX port to the receiver with a cable and attenuators, or use a
-> shielded enclosure.
+> nearby. Connect the bladeRF TX port to the receiver with a cable and attenuators.
 
 ## Requirements
 
@@ -137,7 +136,7 @@ Options:
   -R <azi,ele>     Rx antenna attitude in degree of Ch2 (default: same as Ch1)
   -i               Interactive mode: North='w', South='s', East='d', West='a'
   -I               Disable ionospheric delay for spacecraft scenario
-  -E               Equal distribution of rx and tx antenna pattern
+  -E               Equal signal power for all satellites (no antenna patterns, drop below 18 dB-Hz)
   -p               Disable path loss and hold power level constant
   -j               User motion files are in ECI: angle[rad],x,y,z,vx,vy,vz (z-rotation by angle from ECEF)
   -f               Fast option, run only simulation part as fast as possible without generating IQ (no device needed).
@@ -149,6 +148,21 @@ Options:
   to the start time instead).
 * `-j` applies to both channels.
 * `-a` is the bladeRF TX gain [dB] (bladeRF 2.0: -23.75 to 66). Both TX channels use the same gain.
+
+### Signal power of each satellite
+
+bladeGPS models the C/N0 of each satellite from the GPS transmit power and antenna pattern,
+the free-space path loss and the receiver antenna (pattern and G/T), and logs it in `cn0_chN.txt`.
+How it is applied to the transmitted signals depends on `-E` and `-p`:
+
+| Options | Relative signal power of the satellites |
+| --- | --- |
+| (none) | Follows the modeled C/N0: GPS Tx antenna pattern, Rx antenna pattern (off-boresight angle w.r.t. `-r`/`-R`) and path loss |
+| `-p` | As above but without the path loss |
+| `-E` | Equal for all satellites (with path loss unless `-p`). Satellites below 18 dB-Hz are not transmitted |
+
+The absolute level at the receiver is set by `-a` and your cabling/attenuators, so calibrate it
+with the C/N0 the receiver reports. `-v` prints the relative signal level of each channel in dB.
 
 ## Inputs
 
@@ -196,7 +210,7 @@ The simulation itself runs in GPS time, and the logs use the GPS time of week [s
 | `user_states_chN.txt` | GPS time of week, c0, ECEF position and velocity (dynamic mode) |
 | `user_states_eci_chN.txt` | GPS time of week, theta, ECI position and velocity (dynamic mode) |
 | `visibility_chN.txt` | Visibility (0/1) of each PRN at every channel allocation (30 s) |
-| `cn0_chN.txt` | C/N0 [dB-Hz] of each channel at 10 Hz (only with `-E`) |
+| `cn0_chN.txt` | Modeled C/N0 [dB-Hz] of each allocated channel at 10 Hz |
 
 ## Embedding
 
@@ -210,11 +224,39 @@ not close it. With `dev == NULL`, bladeGPS opens the device (`-b`), sets 2.6 Msp
 on exit. This is how [gnss_sim_receiver](https://github.com/ShingoNishimoto/gnss_sim_receiver)
 runs bladeGPS together with GNSS-SDR.
 
-## Docker (untested)
+## Docker
+
+Instead of installing libbladeRF on the host, bladeGPS can run in a Docker container (Ubuntu
+22.04 with libbladeRF built from the [bladeRF](https://github.com/Nuand/bladeRF) release
+`2023.02`; another release can be set with `--build-arg BLADERF_VERSION=<tag>`).
+
+1. [Install Docker Engine](https://docs.docker.com/engine/install/ubuntu/) with the Compose
+   plugin, and add your user to the `docker` group (`sudo usermod -aG docker $USER`, then log in again).
+
+2. Build the image from the repository root:
+
+        docker compose -f docker/docker-compose.yml build
+
+3. Run a script in the container. The logs are written to `work/` of the repository on the host,
+   owned by your user:
+
+        export HOST_UID=$(id -u) HOST_GID=$(id -g)
+        docker compose -f docker/docker-compose.yml run --rm bladegps scripts/leo.sh -f
+        docker compose -f docker/docker-compose.yml run --rm -e TX_GAIN=-20 bladegps scripts/leo.sh
+
+   Environment variables of the scripts are given with `-e`, and options of bladegps after the
+   script name. Without a command, `scripts/leo.sh -f` is run.
+
+The container accesses the bladeRF through `/dev/bus/usb` in privileged mode, with the `plugdev`
+group of the host (gid 46 on Ubuntu; set `PLUGDEV_GID` if different) for the device permission,
+so the udev rules of libbladeRF must be installed on the host (see Setup). The same with
+`docker run`:
 
     docker build -f docker/Dockerfile -t bladegps .
-    docker run -it --rm --privileged -v /dev/bus/usb:/dev/bus/usb bladegps \
-        /bin/bash -c "bladegps -e /opt/bladeGPS/brdc0150.24n -u /opt/bladeGPS/csv/leo_full_states_eci.csv -j -t 2024/01/15,05:00:00 -d 600 -a -20"
+    docker run --rm -it --privileged -v /dev/bus/usb:/dev/bus/usb \
+        --user $(id -u):$(id -g) --group-add $(getent group plugdev | cut -d: -f3) \
+        -v /etc/localtime:/etc/localtime:ro -v $PWD/work:/opt/bladeGPS/work \
+        bladegps scripts/leo.sh -f
 
 ## Troubleshooting
 

@@ -1,19 +1,22 @@
-
-version: "3.7"
+# Run from the repository root, e.g.
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm bladegps scripts/leo.sh -f
+# Logs are written to work/ of the repository.
 services:
   bladegps:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    cap_add:
-    - ALL
-    command: bladegps -e /opt/bladeGPS/brdc3300.18n -l 35.274,137.014,100 -d 86400
-    container_name: bladegps
-    devices:
-    - /dev/ttyUSB0
-    logging:
-      driver: json-file
-      options:
-        max-file: '10'
-        max-size: 10m
-    restart: always
+    image: bladegps
+    # USB access to the bladeRF (the device node belongs to the plugdev group, gid 46 on Ubuntu)
+    privileged: true
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    group_add:
+      - "${PLUGDEV_GID:-46}"
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - /etc/localtime:/etc/localtime:ro
+      - ../work:/opt/bladeGPS/work
+    stdin_open: true
+    tty: true
+    command: scripts/leo.sh -f
