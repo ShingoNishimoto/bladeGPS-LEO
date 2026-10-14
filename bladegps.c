@@ -206,6 +206,8 @@ void usage(void)
 		"  -T <date,time>   Overwrite TOC and TOE to scenario start time\n"
 		"  -d <duration>    Duration [sec] (max: %.0f)\n"
 		"  -x <XB number>   Enable expansion board, e.g. '-x 200' for XB200\n"
+		"  -b <devstr>      bladeRF device string (standalone use, default: first device)\n"
+		"  -D <data_dir>    Directory of gps_table.csv and antenna/ (default: $BLADEGPS_DATA_DIR or ./gnss)\n"
 		"  -a <tx_gain>     TX Gain (default: %d)\n"
 		"  -r <azi,ele>     Rx antenna attitude in degree (default: azi=0, ele=90)\n"
 		"  -R <azi,ele>     Rx antenna attitude in degree of Ch2 (default: same as Ch1)\n"
@@ -213,7 +215,7 @@ void usage(void)
 		"  -I               Disable ionospheric delay for spacecraft scenario\n"
 		"  -E               Equal distribution of rx and tx antenna pattern\n"
 		"  -p               Disable path loss and hold power level constant\n"
-		"  -f               Fast option, run only simulation part as fast as possible without generating IQ.\n"
+		"  -f               Fast option, run only simulation part as fast as possible without generating IQ (no device needed).\n"
 		"  -v               Verbosity option\n",
 		((double)USER_MOTION_SIZE)/10.0,
 		TX_GAIN,
@@ -222,12 +224,16 @@ void usage(void)
 	return;
 }
 
-#define bladegps_version_helper(x) #x
-#define bladegps_version(x) bladegps_version_helper(x)
+#ifndef GIT_COMMIT_ID
+#define GIT_COMMIT_ID "unknown"
+#endif
+#ifndef GIT_COMMIT_DATE
+#define GIT_COMMIT_DATE ""
+#endif
 
 static void bladegps_opening()
 {
-	printf("\nbladeGPS is now starting. commit=%.8s (%s)\n", bladegps_version(GIT_COMMIT_ID) +7, bladegps_version(GIT_COMMIT_DATE));
+	printf("\nbladeGPS is now starting. commit=%s (%s)\n", GIT_COMMIT_ID, GIT_COMMIT_DATE);
 }
 
 // sim_t *simp = NULL;
@@ -243,7 +249,8 @@ static void bladegps_opening()
 int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 {
 	sim_t s = {0};
-	// char *devstr = NULL;
+	char *devstr = NULL;
+	const bool own_dev = (dev == NULL); // Open/close the device here unless the caller owns it.
 	int xb_board = 0;
 
 	int result;
@@ -294,7 +301,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.ch2_enable = false;
 	s.fast_mode = false;
 
-	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:iIEpfv"))!=-1)
+	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:b:D:iIEpfv"))!=-1)
 	{
 		switch (result)
 		{
@@ -387,6 +394,12 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 		case 'x':
 			xb_board=atoi(optarg);
 			break;
+		case 'b':
+			devstr = optarg;
+			break;
+		case 'D':
+			SetGnssDataDir(optarg);
+			break;
 		case 'a':
 			tx_gain = atoi(optarg);
 			// NOTE: probably not to break bladerf?
@@ -462,8 +475,44 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.tx.dev = dev;
 	s.status = 0;
 
+	if (s.fast_mode)
+	{
+		// Simulation only. No IQ samples are generated, so the device is not used.
+		if (dev != NULL)
+			bladerf_get_sample_rate(dev, tx_channel, &tx_samplerate);
+		num_iq_samples = (tx_samplerate / 10);
+		fifo_length = s.ch2_enable ? (num_iq_samples * 2 * 2) : (num_iq_samples * 2);
+
+		s.status = start_gps_task(&s);
+		if (s.status < 0) {
+			fprintf(stderr, "Failed to start GPS task.\n");
+			return(1);
+		}
+		pthread_join(s.gps.thread, NULL);
+		printf("\nDone!\n");
+		return(s.gps.ready < 0 ? 1 : 0);
+	}
+
+	if (own_dev)
+	{
+		printf("Opening device...\n");
+		s.status = bladerf_open(&s.tx.dev, devstr);
+		if (s.status != 0) {
+			fprintf(stderr, "Failed to open device: %s\n", bladerf_strerror(s.status));
+			s.tx.dev = NULL;
+			goto out;
+		}
+
+		s.status = bladerf_set_sample_rate(s.tx.dev, tx_channel, TX_SAMPLERATE, NULL);
+		if (s.status != 0) {
+			fprintf(stderr, "Failed to set TX sample rate: %s\n", bladerf_strerror(s.status));
+			goto out;
+		}
+	}
+
 	// NOTE: only checking of ch1 because both are the same.
-	// Get sample rate for buffer size.
+	// Get sample rate for buffer size. When the device is given by the caller,
+	// the sample rate set by the caller (e.g. the same as the receiver) is used.
 	s.status = bladerf_get_sample_rate(s.tx.dev, tx_channel, &tx_samplerate);
 	if (s.status != 0) {
 		fprintf(stderr, "Failed to get TX sample rate: %s\n", bladerf_strerror(s.status));
@@ -496,13 +545,6 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 
 	// Initializing device.
 	printf("Initializing device...\n");
-	// printf("Opening and initializing device...\n");
-
-	// s.status = bladerf_open(&s.tx.dev, devstr);
-	// if (s.status != 0) {
-	// 	fprintf(stderr, "Failed to open device: %s\n", bladerf_strerror(s.status));
-	// 	goto out;
-	// }
 
     // FIXME: not used currently, so not set for the ch2 even if the ch2 is used.
 	if(xb_board == 200) {
@@ -555,16 +597,6 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	else {
 		printf("TX frequency: %u Hz\n", TX_FREQUENCY);
 	}
-
-	// Not set sample rate here, use same value as the receiver.
-	// s.status = bladerf_set_sample_rate(s.tx.dev, tx_channel, TX_SAMPLERATE, NULL);
-	// if (s.status != 0) {
-	// 	fprintf(stderr, "Failed to set TX sample rate: %s\n", bladerf_strerror(s.status));
-	// 	goto out;
-	// }
-	// else {
-	// 	printf("TX sample rate: %u sps\n", TX_SAMPLERATE);
-	// }
 
 	// NOTE: set bandwidth only on tx ch1 even though using both channels,
 	// because of the same reason as frequency.
@@ -631,6 +663,12 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	while (!s.gps.ready)
 		pthread_cond_wait(&(s.gps.initialization_done), &(s.tx.lock));
 	pthread_mutex_unlock(&(s.tx.lock));
+
+	if (s.gps.ready < 0) {
+		fprintf(stderr, "GPS task failed to initialize.\n");
+		s.status = -1;
+		goto out;
+	}
 
 	// Fulfill the FIFO.
 	if (is_fifo_write_ready(&s))
@@ -703,11 +741,16 @@ out:
 
 	if (s.fifo != NULL)
 		free(s.fifo);
-	bladerf_set_gain(s.tx.dev, BLADERF_CHANNEL_TX(0), -22);
-	printf("Set TX1 gain at minimum level.\n");
 
-	printf("Closing device...\n");
-	bladerf_close(s.tx.dev);
+	if (s.tx.dev != NULL) {
+		bladerf_set_gain(s.tx.dev, BLADERF_CHANNEL_TX(0), -22);
+		printf("Set TX1 gain at minimum level.\n");
 
-	return(0);
+		if (own_dev) {
+			printf("Closing device...\n");
+			bladerf_close(s.tx.dev);
+		}
+	}
+
+	return(s.status == 0 ? 0 : 1);
 }

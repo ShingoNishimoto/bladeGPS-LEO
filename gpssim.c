@@ -8,7 +8,6 @@
 #include <assert.h>
 
 #include <time.h>
-#include <omp.h>
 #ifdef _WIN32
 #include "getopt.h"
 #include <conio.h>
@@ -25,7 +24,6 @@
 
 #include "gpssim.h"
 #include "bladegps.h"
-#include "../algorithms/libs/environment/frame.h"
 
 // #define NO_LOG_OUT
 #define MAX_FILENAME_LEN 1024
@@ -108,11 +106,6 @@ double ant_pat_db[37] = {
     31.56
 };
 
-// Environment
-static TimeSystem *time_system;
-static earth *earth_;
-static moon *moon_;
-static Frame *frame;
 static gps_satellite gps_sats[MAX_SAT];
 
 /*! \brief Subtract two vectors of double
@@ -1999,7 +1992,7 @@ int generateNavMsg(const gpstime_t g, channel_t *chan, int init)
  *  \param[out] chan Receiver channel, compute tx_antenna_gain, and azel
  *  \returns visible (1), invisible (0), or invalid (-1)
  */
-int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *receiver_pos, channel_t *chan, double lunar_pos_ecef[3])
+int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *receiver_pos, channel_t *chan)
 {
     double llh[3],neu[3];
     double pos[3],vel[3],clk[3],los[3];
@@ -2047,31 +2040,7 @@ int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *rec
     if (chan->azel[1] < el_earth_edge)  // Check only geometric visibility
         return 0;
 
-    // TODO: think better way
-    if (llh[2] > 3e8)
-        {
-            // FIXME: this is not right. instant los is not accurate.
-            // Check if the sc is behind of moon
-            const double radius_moon_m = GetRadiusKm(moon_) * 1000;
-            double los_from_moon_to_gps[3];
-            subVect(los_from_moon_to_gps, pos, lunar_pos_ecef);
-            double distance_sc2gps = normVect(los);
-            double distance_moon2gps = normVect(los_from_moon_to_gps);
-            double zenith_lunar_edge_rad = asin(radius_moon_m / distance_moon2gps);
-            // Check elevation only when the distance is bigger than distance to edge
-            if (distance_sc2gps > distance_moon2gps * cos(zenith_lunar_edge_rad))
-                {
-                    // NOTE: should be around 0.004453 rad.
-                    double zenith_sc_rad = acos(dotProd(los_from_moon_to_gps, los) / (distance_moon2gps * distance_sc2gps));
-                    // Behind the moon
-                    if (zenith_sc_rad < zenith_lunar_edge_rad)
-                        {
-                            // For debug
-                            printf("SC is behind the moon!\n");
-                            return 0;
-                        }
-                }
-        }
+    // NOTE: occultation by the Moon is not considered (LEO use only).
 
     return 1;  // visible
 }
@@ -2114,36 +2083,11 @@ int allocateChannel(channel_t *chan, int *allocatedSat, const ephem_t* eph, cons
         fprintf(log_file, "%lf", grx.sec);
     #endif  // NO_LOG_OUT
 
-    // FIXME: maybe this is heavy.
-    // Preparation for moon occultation check
-    double tt = ConvGPSTimeToTt(time_system, env->g->week, env->g->sec);
-    const double* lunar_pos_i = GetPositionI(moon_, tt);
-    double dcm_eci_to_ecef[9];
-    GetDcmEciToEcef(frame, tt, dcm_eci_to_ecef);
-    double lunar_pos_ecef[3];
-    for (i = 0; i < 3; i++)
-        {
-            lunar_pos_ecef[i] = dcm_eci_to_ecef[3 * i] * lunar_pos_i[0]
-                                + dcm_eci_to_ecef[3 * i + 1] * lunar_pos_i[1]
-                                + dcm_eci_to_ecef[3 * i + 2] * lunar_pos_i[2];
-        }
-    // For debug
-    // static FILE* fpt = NULL;
-    // if (fpt == NULL)
-    // 	fpt = fopen("moon_eci.csv", "w+");
-    // 	// fpt = fopen("los_moon2sat.csv", "w+");
-    // // double los_moon2sat[3];
-    // // subVect(los_moon2sat, receiver_states, lunar_pos_ecef);
-    // // double distance_from_moon = normVect(los_moon2sat);
-    // // fprintf(fpt, "%lf, %lf, %lf, %lf\n", los_moon2sat[0], los_moon2sat[1], los_moon2sat[2], distance_from_moon);
-    // fprintf(fpt, "%lf, %lf, %lf, %lf, %lf\n", tt, lunar_pos_i[0], lunar_pos_i[1], lunar_pos_i[2], normVect(lunar_pos_i));
-    // fflush(fpt);
-
     // Allocate channel
     for (sv=0; sv<MAX_SAT; sv++)
     {
         channel_t channel = {};
-        if(checkSatVisibility(&eph[sv], env->g, &(receiver_states[1]), &channel, lunar_pos_ecef) == 1)
+        if(checkSatVisibility(&eph[sv], env->g, &(receiver_states[1]), &channel) == 1)
         {
 #ifndef NO_LOG_OUT
             if (log_file != NULL)
@@ -2556,6 +2500,16 @@ exit:
 }
 
 
+void close_log_files(FILE *log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2])
+{
+    for (uint8_t i = 0; i < 2; i++)
+    {
+        if (visibility_log_files[i] != NULL) fclose(visibility_log_files[i]);
+        if (cn0_log_files[i] != NULL) fclose(cn0_log_files[i]);
+        if (log_files[i] != NULL) fclose(log_files[i]);
+    }
+}
+
 void log_user_position(FILE *log_file, bool enabled, double time, double *state)
 {
     if (!enabled || log_file == NULL || state == NULL)
@@ -2708,13 +2662,11 @@ void *gps_task(void *arg)
     // independent options b/w ch
     strcpy(umfile, s->opt.umfile);
 
-    // Initialize global variables for environment
-    // FIXME: better to put them into env_t?
-    time_system = TimeSystemInit();
-    earth_ = EarthInit(ConvGPSTimeToTt(time_system, g0.week, g0.sec));
-    moon_ = MoonInit(g0.week, g0.sec, EarthGravityConst(earth_));
-    frame = FrameInit(earth_, moon_, time_system);
-    InitGPSSatellite(gps_sats);
+    if (InitGPSSatellite(gps_sats))
+    {
+        printf("ERROR: Failed to read GPS satellite table / antenna patterns.\n");
+        goto exit;
+    }
 
     ////////////////////////////////////////////////////////////
     // Receiver position
@@ -3073,9 +3025,9 @@ void *gps_task(void *arg)
 
 #ifndef NO_LOG_OUT
         // TODO: the log output is too frequent?
-        fprintf(cn0_log_files[0], "%lf", grx.sec);
+        if (cn0_log_files[0] != NULL) fprintf(cn0_log_files[0], "%lf", grx.sec);
         if (s->ch2_enable)
-            fprintf(cn0_log_files[1], "%lf", grx.sec);
+            if (cn0_log_files[1] != NULL) fprintf(cn0_log_files[1], "%lf", grx.sec);
 #endif  // NO_LOG_OUT
         for (i=0; i<MAX_CHAN; i++)
         {
@@ -3087,9 +3039,9 @@ void *gps_task(void *arg)
             }
         }
 #ifndef NO_LOG_OUT
-        fprintf(cn0_log_files[0], "\n");
+        if (cn0_log_files[0] != NULL) fprintf(cn0_log_files[0], "\n");
         if (s->ch2_enable)
-            fprintf(cn0_log_files[1], "\n");
+            if (cn0_log_files[1] != NULL) fprintf(cn0_log_files[1], "\n");
 #endif  // NO_LOG_OUT
 
         if (!s->fast_mode)
@@ -3250,27 +3202,15 @@ abort:
         free(receiver_states2);
     }
 
-    // Close log file
-    for (i = 0; i < 2; i++)
-    {
-        if (i == 1 && !s->ch2_enable) break;
-        fclose(visibility_log_files[i]);
-        fclose(cn0_log_files[i]);
-        if (dump_user_pos[i])
-            fclose(log_files[i]);
-    }
+    close_log_files(log_files, visibility_log_files, cn0_log_files);
     return (NULL);
 
 exit:
-    // Close log file
-    for (i = 0; i < 2; i++)
-    {
-        if (i == 1 && !s->ch2_enable) break;
-        fclose(visibility_log_files[i]);
-        fclose(cn0_log_files[i]);
-        if (dump_user_pos[i])
-            fclose(log_files[i]);
-    }
+    close_log_files(log_files, visibility_log_files, cn0_log_files);
+
+    // Let the caller waiting for the initialization know the failure.
+    s->gps.ready = -1;
+    pthread_cond_signal(&(s->gps.initialization_done));
 
     printf("Abort.\n");
     return (NULL);

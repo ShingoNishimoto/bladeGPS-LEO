@@ -15,7 +15,7 @@
 #include "gpssim.h"
 
 #define TX_FREQUENCY	1575420000
-// #define TX_SAMPLERATE	2600000
+#define TX_SAMPLERATE	2600000 // used only when bladeGPS opens the device by itself
 #define TX_BANDWIDTH	2500000
 #define TX_GAIN		-5
 
