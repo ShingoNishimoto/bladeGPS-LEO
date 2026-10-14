@@ -13,6 +13,9 @@
 /*! \brief Maximum length of a line in a text file (RINEX, motion) */
 #define MAX_CHAR (256)
 
+/*! \brief Signal gain (amplitude) of a channel is scaled by 2^SIGNAL_GAIN_SHIFT */
+#define SIGNAL_GAIN_SHIFT (15)
+
 /*! \brief Maximum number of channels we simulate */
 #define MAX_CHAN (24)
 

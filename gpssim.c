@@ -108,6 +108,7 @@ double ant_pat_db[37] = {
 };
 
 static gps_satellite gps_sats[MAX_SAT];
+static int8_t max_tx_antenna_gain_db = 0; // Maximum of all the GPS Tx antenna patterns [dB]
 
 /*! \brief Subtract two vectors of double
  *  \param[out] y Result of subtraction
@@ -2220,14 +2221,15 @@ void printChannelInformation(const channel_t *chan, const double *pos)
     printf("xyz = %11.1f, %11.1f, %11.1f\n", pos[0], pos[1], pos[2]);
     xyz2llh(pos, llh);
     printf("llh = %11.6f, %11.6f, %11.1f\n", llh[0]*R2D, llh[1]*R2D, llh[2]);
-    printf("PRN    Azi   Ele PseudoRange   Ion TxGain\n");
+    printf("PRN    Azi   Ele PseudoRange   Ion TxGain  Signal[dB]\n");
     int i;
     for (i = 0; i < MAX_CHAN; i++)
     {
         const uint8_t PRN = (chan[i].sat_id >= 0) ? gps_sats[chan[i].sat_id].sat_info.PRN : 0;
         if (PRN > 0)
-            printf(" %02d %6.1f %5.1f %11.1f %5.1f %6d\n", PRN,
-                chan[i].azel[0] * R2D, chan[i].azel[1] * R2D, chan[i].rho0.d, chan[i].rho0.iono_delay, chan[i].tx_antenna_gain);
+            printf(" %02d %6.1f %5.1f %11.1f %5.1f %6d %11.2f\n", PRN,
+                chan[i].azel[0] * R2D, chan[i].azel[1] * R2D, chan[i].rho0.d, chan[i].rho0.iono_delay, chan[i].tx_antenna_gain,
+                (chan[i].gain > 0) ? 20.0 * log10((double)chan[i].gain / (double)(1 << SIGNAL_GAIN_SHIFT)) : -INFINITY);
     }
 }
 
@@ -2304,31 +2306,31 @@ bool computeObservation(channel_t* chan, const ephem_t* eph, const env_t* env, c
     int ibs = (int)((90.0 - rho.azel[1] * R2D) / 5.0); // covert elevation to boresight
     double rec_ant_gain = opt->antenna_pattern_enable ? ant_pat[ibs] : 1.0;
 
-    // GPS Tx antenna gain
-    const int8_t boresight_tx_gain_db = gps_sats[chan->sat_id].antenna_gain[0][0];
-    // Normalize it to avoid the over range
-    const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - boresight_tx_gain_db) / 10.0) : 1.0;
+    // GPS Tx antenna gain, normalized by the maximum gain of all the satellites to avoid the over range
+    // and to keep the difference between satellites. NOTE: chan->gain is an amplitude, so dB / 20.
+    const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - max_tx_antenna_gain_db) / 20.0) : 1.0;
     static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
     static const double boltzmann_const = 228.6;
     static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
     static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
     static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
-    double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const;
-    if (!opt->antenna_pattern_enable)
-        {
+    // Receiver antenna pattern attenuation w.r.t. boresight, applied to the signal as well
+    const double rec_ant_att_db = opt->antenna_pattern_enable ? ant_pat_db[ibs] : 0.0;
+    double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const - rec_ant_att_db;
 #ifndef NO_LOG_OUT
-            if (cn0_log != NULL)
-                fprintf(cn0_log, ",%lf", rx_CN0);
+    if (cn0_log != NULL)
+        fprintf(cn0_log, ",%lf", rx_CN0);
 #endif // NO_LOG_OUT
-            if (rx_CN0 < required_CN0)
-                {
-                    chan->gain = 0;
-                    return false;
-                }
+    // With equal power (-E), drop the satellites whose C/N0 is too low to be tracked.
+    // Otherwise the signal is attenuated according to the antenna patterns and path loss.
+    if (!opt->antenna_pattern_enable && rx_CN0 < required_CN0)
+        {
+            chan->gain = 0;
+            return false;
         }
 
-    // Signal gain
-    chan->gain = (int)(path_loss_for_sim * rec_ant_gain * normalized_tx_gain * 128.0); // scaled by 2^7
+    // Signal gain (amplitude)
+    chan->gain = (int)(path_loss_for_sim * rec_ant_gain * normalized_tx_gain * (double)(1 << SIGNAL_GAIN_SHIFT));
     return true;
 }
 
@@ -2390,9 +2392,9 @@ void computeIQacc(int *iq_acc, channel_t * chan)
         }
     }
 
-    // Scaled by 2^7
-    iq_acc[0] = (iq_acc[0] + 64) >> 7;
-    iq_acc[1] = (iq_acc[1] + 64) >> 7;
+    // Remove the scale of the signal gain
+    iq_acc[0] = (iq_acc[0] + (1 << (SIGNAL_GAIN_SHIFT - 1))) >> SIGNAL_GAIN_SHIFT;
+    iq_acc[1] = (iq_acc[1] + (1 << (SIGNAL_GAIN_SHIFT - 1))) >> SIGNAL_GAIN_SHIFT;
 }
 
 
@@ -2660,6 +2662,15 @@ void *gps_task(void *arg)
         printf("ERROR: Failed to read GPS satellite table / antenna patterns.\n");
         goto exit;
     }
+    {
+        // Truncated to int8_t as the gain of each channel (GetAntennaGain)
+        double max_gain = -INFINITY;
+        for (sv = 0; sv < MAX_SAT; sv++)
+            for (int ie = 0; ie < ANT_ELE_NUM; ie++)
+                for (int ia = 0; ia < ANT_AZI_NUM; ia++)
+                    max_gain = fmax(max_gain, gps_sats[sv].antenna_gain[ie][ia]);
+        max_tx_antenna_gain_db = (int8_t)max_gain;
+    }
 
     ////////////////////////////////////////////////////////////
     // Receiver position
@@ -2913,7 +2924,7 @@ void *gps_task(void *arg)
 
     // TODO: enhance for ch2
     for (i=0; i<37; i++)
-        ant_pat[i] = pow(10.0, -ant_pat_db[i]/20.0); // FIXME: should be 10log.
+        ant_pat[i] = pow(10.0, -ant_pat_db[i]/20.0); // amplitude
 
     ////////////////////////////////////////////////////////////
     // Generate baseband signals
