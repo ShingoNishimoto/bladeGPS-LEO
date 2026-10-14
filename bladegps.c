@@ -275,6 +275,8 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 		usage();
 		exit(1);
 	}
+	// Line buffered even when the output is piped (e.g. to tee in the scripts)
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	bladegps_opening();
 
 	// if (signal(SIGINT, bladeGPS_signal_handler) == SIG_ERR &&

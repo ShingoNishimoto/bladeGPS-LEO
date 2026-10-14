@@ -13,4 +13,4 @@ TX_GAIN=${TX_GAIN:--15}
 
 make_run_dir leo
 run_bladegps -t "$START" -e "$nav" -d "$DURATION" -u "$TRAJ" -j \
-    -s ./ -a "$TX_GAIN" -r 0,90 -p -I -E -v "$@"
+    -s ./ -a "$TX_GAIN" -r 0,90 -I -v "$@"

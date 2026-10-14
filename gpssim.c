@@ -113,8 +113,8 @@ static int8_t max_tx_antenna_gain_db = 0; // Maximum of all the GPS Tx antenna p
 // Link budget for the modeled C/N0
 static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
 static const double boltzmann_const = 228.6;
-static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
-static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
+static const double rx_antenna_gain = 0.0;  // [dBi] receiver antenna gain at boresight
+static const double rx_GT = rx_antenna_gain - 24.0;  // [dB/K] system noise temperature 24 dB-K (LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K)
 static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
 static const double reference_distance = 20200000.0; // [m] signal amplitude is 1 at this distance with path loss
 
@@ -3195,9 +3195,9 @@ void *gps_task(void *arg)
         grx = incGpsTime(grx, 0.1);
         env.g = &grx;
 
-        // Update time counter
-        // printf("\rTime into run = %4.1f", subGpsTime(grx, g0));
-        // fflush(stdout);
+        // Show the progress every 1 s in real time
+        if (!s->fast_mode && iumd % 10 == 0)
+            printf("Time into run = %.0f / %.0f s\n", iumd / 10.0, numd / 10.0);
     }
 
 abort:

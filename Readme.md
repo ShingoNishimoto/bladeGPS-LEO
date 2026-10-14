@@ -87,7 +87,7 @@ This creates `work/<date>_leo/` with the logs and finishes in a few seconds. The
 
     mkdir -p work/test && cd work/test
     ../../bladegps -t 2024/01/15,05:00:00 -e ../../brdc0150.24n -u ../../csv/leo_full_states_eci.csv -j \
-        -d 8000 -s ./ -a -20 -r 0,90 -p -I -E -v
+        -d 8000 -s ./ -a -20 -r 0,90 -I -v
 
 ## Scripts
 
@@ -98,7 +98,7 @@ keep the logs, the command line (`command.txt`) and the console output (`bladegp
 | Script | Scenario |
 | --- | --- |
 | `scripts/static.sh` | Static ground receiver on TX1 |
-| `scripts/leo.sh` | LEO spacecraft on TX1 |
+| `scripts/leo.sh` | LEO spacecraft on TX1, with the antenna patterns and path loss |
 | `scripts/leo_dual.sh` | Two LEO spacecraft with different orbits on TX1 and TX2 (set the second orbit with `TRAJ2`) |
 | `scripts/ground_leo.sh` | Static ground receiver on TX1 and LEO spacecraft on TX2 |
 | `scripts/realtime.sh` | Static receiver at the current time with today's ephemeris from CDDIS (`-l` required) |
@@ -186,7 +186,7 @@ C/N0 in `cn0_chN.txt`.
 
    bladeGPS prints the C/N0 that corresponds to the level 0 dB in the link budget model:
 
-        Reference C/N0 (signal level 0 dB): 65.6 dB-Hz
+        Reference C/N0 (signal level 0 dB): 50.6 dB-Hz
 
 3. Read the C/N0 of the tracked satellites from the receiver (they are about the same) and change
    `-a` (or the attenuation) until they match the reference C/N0. 1 dB of `-a` changes the C/N0 by
@@ -199,7 +199,7 @@ C/N0 in `cn0_chN.txt`.
 
 Notes:
 
-* The reference (65.6 dB-Hz) assumes a 15 dB array antenna and G/T of -9 dB/K. If your receiver
+* The reference (50.6 dB-Hz) assumes a 0 dBi receiver antenna at boresight and G/T of -24 dB/K. If your receiver
   cannot reach it (e.g. its noise floor or the bladeRF noise limits the C/N0), calibrate to a lower
   C/N0 and take the offset into account when comparing with `cn0_chN.txt`.
 * TX1 and TX2 use the same `-a`, so equalize the two paths with attenuators, and check both.
