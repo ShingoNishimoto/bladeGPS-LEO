@@ -44,6 +44,8 @@ Temporary Items
 
 # Linux
 *.o
+*.d
+.build_flags
 *.so
 *.swp
 bladegps

@@ -110,6 +110,23 @@ double ant_pat_db[37] = {
 static gps_satellite gps_sats[MAX_SAT];
 static int8_t max_tx_antenna_gain_db = 0; // Maximum of all the GPS Tx antenna patterns [dB]
 
+// Link budget for the modeled C/N0
+static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
+static const double boltzmann_const = 228.6;
+static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
+static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
+static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
+static const double reference_distance = 20200000.0; // [m] signal amplitude is 1 at this distance with path loss
+
+/*! \brief Modeled C/N0 [dB-Hz] of a signal transmitted at the level 0 dB (amplitude 1)
+ *  With path loss (no -p), C/N0 - signal level [dB] equals this value for every satellite.
+ */
+double referenceCN0(void)
+{
+    const double path_loss_db = 20 * log10(4 * PI * reference_distance * TX_FREQUENCY / SPEED_OF_LIGHT);
+    return boresight_tx_power + max_tx_antenna_gain_db - path_loss_db + rx_GT + boltzmann_const;
+}
+
 /*! \brief Subtract two vectors of double
  *  \param[out] y Result of subtraction
  *  \param[in] x1 Minuend of subtracion
@@ -2299,7 +2316,7 @@ bool computeObservation(channel_t* chan, const ephem_t* eph, const env_t* env, c
     chan->carr_phasestep = (int)(512 * 65536.0 * chan->f_carr * delt);
 
     // Path loss
-    double path_loss_for_sim = opt->path_loss_enable ? 20200000.0/rho.d : 1.0;
+    double path_loss_for_sim = opt->path_loss_enable ? reference_distance/rho.d : 1.0;
     double path_loss_db = 20 * log10(4 * PI * rho.d * TX_FREQUENCY / SPEED_OF_LIGHT);
 
     // Receiver antenna gain
@@ -2309,11 +2326,6 @@ bool computeObservation(channel_t* chan, const ephem_t* eph, const env_t* env, c
     // GPS Tx antenna gain, normalized by the maximum gain of all the satellites to avoid the over range
     // and to keep the difference between satellites. NOTE: chan->gain is an amplitude, so dB / 20.
     const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - max_tx_antenna_gain_db) / 20.0) : 1.0;
-    static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
-    static const double boltzmann_const = 228.6;
-    static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
-    static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
-    static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
     // Receiver antenna pattern attenuation w.r.t. boresight, applied to the signal as well
     const double rec_ant_att_db = opt->antenna_pattern_enable ? ant_pat_db[ibs] : 0.0;
     double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const - rec_ant_att_db;
@@ -2671,6 +2683,7 @@ void *gps_task(void *arg)
                     max_gain = fmax(max_gain, gps_sats[sv].antenna_gain[ie][ia]);
         max_tx_antenna_gain_db = (int8_t)max_gain;
     }
+    printf("Reference C/N0 (signal level 0 dB): %.1f dB-Hz\n", referenceCN0());
 
     ////////////////////////////////////////////////////////////
     // Receiver position

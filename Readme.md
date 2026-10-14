@@ -25,6 +25,7 @@ Moon occultation and other cislunar features of gnss_sim_receiver are not includ
 > [!WARNING]
 > Transmitting on GPS L1 over the air is illegal in most countries and can disturb GPS receivers
 > nearby. Connect the bladeRF TX port to the receiver with a cable and attenuators.
+> Calibrate the power for your cabling before using a receiver (see [Power calibration](#power-calibration)).
 
 ## Requirements
 
@@ -77,7 +78,8 @@ Simulation only (no bladeRF needed), LEO spacecraft from the example trajectory:
     scripts/leo.sh -f
 
 This creates `work/<date>_leo/` with the logs and finishes in a few seconds. Then with RF output
-(check the warning above and set the TX gain for your attenuation):
+(check the warning above, and calibrate the TX gain for your cabling first, see
+[Power calibration](#power-calibration)):
 
     TX_GAIN=-20 scripts/leo.sh
 
@@ -161,8 +163,47 @@ How it is applied to the transmitted signals depends on `-E` and `-p`:
 | `-p` | As above but without the path loss |
 | `-E` | Equal for all satellites (with path loss unless `-p`). Satellites below 18 dB-Hz are not transmitted |
 
-The absolute level at the receiver is set by `-a` and your cabling/attenuators, so calibrate it
-with the C/N0 the receiver reports. `-v` prints the relative signal level of each channel in dB.
+The level of each channel is relative: 0 dB is the full amplitude (all satellites with `-E -p`,
+or otherwise a satellite at 20200 km with the strongest GPS antenna gain, on the Rx antenna boresight). `-v` prints the level of each
+channel in dB. The absolute power at the receiver is set by `-a` and your cabling, see
+[Power calibration](#power-calibration).
+
+### Power calibration
+
+The power at the receiver input depends on the TX gain `-a`, the bladeRF and the cables,
+attenuators and splitters between the bladeRF and the receiver. Calibrate it for each setup before
+running with an actual GNSS receiver, so that the C/N0 the receiver reports matches the modeled
+C/N0 in `cn0_chN.txt`.
+
+1. Connect TX1 (and TX2) to the receiver RF input with a cable and fixed attenuators. If the
+   receiver supplies a DC bias for an active antenna, put a DC block in between to protect the
+   bladeRF. Start with a large attenuation and a low TX gain, and increase step by step.
+
+2. Run a static scenario with equal power for all satellites (`-E -p`, as in `scripts/static.sh`),
+   so that every satellite is transmitted at the level 0 dB:
+
+        TX_GAIN=-20 scripts/static.sh
+
+   bladeGPS prints the C/N0 that corresponds to the level 0 dB in the link budget model:
+
+        Reference C/N0 (signal level 0 dB): 65.6 dB-Hz
+
+3. Read the C/N0 of the tracked satellites from the receiver (they are about the same) and change
+   `-a` (or the attenuation) until they match the reference C/N0. 1 dB of `-a` changes the C/N0 by
+   about 1 dB. Check the linearity: increasing `-a` by 3 dB should increase the C/N0 by 3 dB. If it
+   does not, the receiver front end saturates; add attenuation.
+
+4. Keep this TX gain for the setup (e.g. `TX_GAIN=<gain>` for the scripts). Then, without `-E` and
+   `-p`, the C/N0 of each satellite at the receiver follows `cn0_chN.txt`, and with `-E -p` all
+   satellites are received at about the reference C/N0.
+
+Notes:
+
+* The reference (65.6 dB-Hz) assumes a 15 dB array antenna and G/T of -9 dB/K. If your receiver
+  cannot reach it (e.g. its noise floor or the bladeRF noise limits the C/N0), calibrate to a lower
+  C/N0 and take the offset into account when comparing with `cn0_chN.txt`.
+* TX1 and TX2 use the same `-a`, so equalize the two paths with attenuators, and check both.
+* Calibrate again when the cables, attenuators, bladeRF or receiver change.
 
 ## Inputs
 
