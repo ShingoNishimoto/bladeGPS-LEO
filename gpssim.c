@@ -3215,15 +3215,16 @@ void *gps_task(void *arg)
         // fflush(stdout);
     }
 
-    goto exit;
-
 abort:
 #ifndef _WIN32
     changemode(0);
 #endif
 
-    // Done!
+    // Done! Wake up the TX task to let it transmit the rest and finish.
+    pthread_mutex_lock(&(s->gps.lock));
     s->finished = true;
+    pthread_mutex_unlock(&(s->gps.lock));
+    pthread_cond_signal(&(s->fifo_read_ready));
 
     // Free I/Q buffer
     free(iq_buff);

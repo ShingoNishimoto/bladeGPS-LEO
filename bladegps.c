@@ -110,9 +110,15 @@ void *tx_task(void *arg)
 		while (buffer_samples_remaining > 0) {
 
 			pthread_mutex_lock(&(s->gps.lock));
-			while (get_sample_length(s) == 0)
+			while (get_sample_length(s) == 0 && !is_finished_generation(s))
 			{
 				pthread_cond_wait(&(s->fifo_read_ready), &(s->gps.lock));
+			}
+			if (get_sample_length(s) == 0)
+			{
+				// Generation finished and the FIFO is empty.
+				pthread_mutex_unlock(&(s->gps.lock));
+				goto out;
 			}
 
 			samples_populated = fifo_read(tx_buffer_current,
