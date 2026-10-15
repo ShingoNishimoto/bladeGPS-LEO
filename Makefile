@@ -1,51 +1,50 @@
 # Makefile for Linux etc.
 
-.PHONY: all clean do_nothing_and_never_up_to_date install
-all: libbladegps.so
+.PHONY: all lib clean install FORCE
+all: bladegps
 
 SHELL=/bin/bash
 CC=gcc
-CXX=g++
-#CFLAGS+=-O3 -Wall -I../../bladeRF/host/libraries/libbladeRF/include -fPIC
-CFLAGS+=-g -Wall -I../../bladeRF/host/libraries/libbladeRF/include -fPIC -O3 -lcsv
-LDFLAGS=-g -lm -lpthread -L../../bladeRF/host/build/output -lbladeRF -shared -lcsv
 
-# gnss-sdr cpp files for environment
-libs_dir = ../algorithms/libs/environment/
-rtklib_dir = ../algorithms/libs/rtklib/
-CXXFLAGS =-g -Wall -lm -I$(libs_dir) -I$(rtklib_dir) -I../core/system_parameters/ -I$(HOME)/work/cspice/include -fPIC -O3
-LDXXFLAGS=-g -lm -I$(rtklib_dir) -I../core/system_parameters/ -shared
-CXX_SRCS = $(libs_dir)time_system.cc $(libs_dir)celestial_body.cc $(libs_dir)earth.cc $(libs_dir)frame.cc $(libs_dir)moon.cc #$(rtklib_dir)rtklib_rtkcmn.cc
-CXX_OBJS = $(CXX_SRCS:.cc=.o)
+# libbladeRF from pkg-config by default; override e.g.
+#   make BLADERF_CFLAGS=-I<bladeRF>/host/libraries/libbladeRF/include BLADERF_LIBS="-L<bladeRF>/host/build/output -lbladeRF"
+BLADERF_CFLAGS ?= $(shell pkg-config --cflags libbladeRF 2>/dev/null)
+BLADERF_LIBS ?= $(shell pkg-config --libs libbladeRF 2>/dev/null || echo -lbladeRF)
 
-GIT_COMMIT_INFO := $(shell git log -1 | sed -e '1,2s/$$/\\n/;4,$$d' | tr -d '\n')
-GIT_COMMIT_ID := $(shell git log -1 | sed -n '1,1p')
-GIT_COMMIT_DATE := $(shell git log -1 | sed -n '3,3p')
-CFLAGS+=-DGIT_COMMIT_ID="$(GIT_COMMIT_ID)" -DGIT_COMMIT_DATE="$(GIT_COMMIT_DATE)"
+# Default location of gps_table.csv and antenna/ (overridden by -D option or $BLADEGPS_DATA_DIR)
+GNSS_DATA_DIR ?= $(CURDIR)/gnss
 
-# TARGET = environment.so
+GIT_COMMIT_ID := $(shell git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+GIT_COMMIT_DATE := $(shell git log -1 --format=%cd 2>/dev/null)
 
-# all: $(TARGET)
+# -MMD -MP: rebuild objects when a header changes
+CFLAGS += -O3 -Wall -fPIC -MMD -MP $(BLADERF_CFLAGS)
+CFLAGS += -DGNSS_DATA_DIR=\"$(GNSS_DATA_DIR)\"
+CFLAGS += -DGIT_COMMIT_ID=\"$(GIT_COMMIT_ID)\" -DGIT_COMMIT_DATE="\"$(GIT_COMMIT_DATE)\""
+LDLIBS = $(BLADERF_LIBS) -lm -lpthread
 
-%.o: %.c
-	$(CC) -DSOURCE_FILE=\"$(shell realpath $<)\" $(CFLAGS) -c $< -o $@
+OBJS = bladegps.o gpssim.o gpssatellite.o eci.o
 
-$(libs_dir)%.o: $(libs_dir)%.cc
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+# Rebuild when the build settings (data directory, commit, flags) change
+BUILD_FLAGS = $(CC) $(CPPFLAGS) $(CFLAGS)
+.build_flags: FORCE
+	@echo '$(BUILD_FLAGS)' | cmp -s - $@ || echo '$(BUILD_FLAGS)' > $@
+main.o $(OBJS): .build_flags
 
-# $(rtklib_dir)rtklib_rtkcmn.o: $(rtklib_dir)rtklib_rtkcmn.cc
-# 	$(CXX) $(CXXFLAGS) -c $< -o $@
+bladegps: main.o $(OBJS)
+	$(CC) $^ $(LDLIBS) -o $@
 
-# $(TARGET): $(CXX_OBJS)
-# 	$(CXX) $(LDXXFLAGS) -o $@ $(CXX_OBJS)
-
-# libbladegps.so: bladegps.o gpssim.o gpssatellite.o $(TARGET)
-libbladegps.so: bladegps.o gpssim.o gpssatellite.o $(CXX_OBJS)
-	${CXX} $^ ${LDFLAGS} -o $@ ~/work/cspice/lib/cspice.a
-# -L$(libs_dir) -lenvironment
+# Shared library exposing bladegps_main() for embedding (e.g. gnss_sim_receiver)
+lib: libbladegps.so
+libbladegps.so: $(OBJS)
+	$(CC) -shared $^ $(LDLIBS) -o $@
 
 clean:
-	rm -f *.o *.so $(libs_dir)*.o
+	rm -f *.o *.d *.so bladegps .build_flags
 
-install:
-	install libbladegps.so /usr/local/lib
+FORCE:
+
+-include $(wildcard *.d)
+
+install: bladegps
+	install bladegps /usr/local/bin

@@ -50,8 +50,6 @@ uint8_t InitGPSSatellite(gps_satellite* gps_sats);
 uint8_t GetAntennaGain(const gps_satellite* gps_sat, const uint8_t elevation_deg, const uint16_t azimuth_deg, int8_t* gain);
 uint8_t ReadGpsTable(gps_table* gps_tables);
 uint8_t ReadGpsAntennaGain(gps_satellite* gps_sat);
-
-void field_cb(void* s, size_t len, void* data_);
-void row_cb(int c, void* data_);
+void SetGnssDataDir(const char* dir);
 
 #endif // _GPS_SATELLITE_H

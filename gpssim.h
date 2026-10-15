@@ -13,6 +13,9 @@
 /*! \brief Maximum length of a line in a text file (RINEX, motion) */
 #define MAX_CHAR (256)
 
+/*! \brief Signal gain (amplitude) of a channel is scaled by 2^SIGNAL_GAIN_SHIFT */
+#define SIGNAL_GAIN_SHIFT (15)
+
 /*! \brief Maximum number of channels we simulate */
 #define MAX_CHAN (24)
 
@@ -212,5 +215,10 @@ typedef struct
 } channel_t;
 
 void date2gps(const datetime_t *t, gpstime_t *g);
+gpstime_t incGpsTime(gpstime_t g0, double dt);
+double subGpsTime(gpstime_t g1, gpstime_t g0);
+void gps2date(const gpstime_t *g, datetime_t *t);
+void utc2gps(const datetime_t *t, gpstime_t *g);
+void gps2utc(const gpstime_t *g, datetime_t *t);
 
 #endif

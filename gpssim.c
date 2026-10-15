@@ -8,7 +8,6 @@
 #include <assert.h>
 
 #include <time.h>
-#include <omp.h>
 #ifdef _WIN32
 #include "getopt.h"
 #include <conio.h>
@@ -25,7 +24,7 @@
 
 #include "gpssim.h"
 #include "bladegps.h"
-#include "../algorithms/libs/environment/frame.h"
+#include "eci.h"
 
 // #define NO_LOG_OUT
 #define MAX_FILENAME_LEN 1024
@@ -108,12 +107,25 @@ double ant_pat_db[37] = {
     31.56
 };
 
-// Environment
-static TimeSystem *time_system;
-static earth *earth_;
-static moon *moon_;
-static Frame *frame;
 static gps_satellite gps_sats[MAX_SAT];
+static int8_t max_tx_antenna_gain_db = 0; // Maximum of all the GPS Tx antenna patterns [dB]
+
+// Link budget for the modeled C/N0
+static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
+static const double boltzmann_const = 228.6;
+static const double rx_antenna_gain = 0.0;  // [dBi] receiver antenna gain at boresight
+static const double rx_GT = rx_antenna_gain - 24.0;  // [dB/K] system noise temperature 24 dB-K (LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K)
+static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
+static const double reference_distance = 20200000.0; // [m] signal amplitude is 1 at this distance with path loss
+
+/*! \brief Modeled C/N0 [dB-Hz] of a signal transmitted at the level 0 dB (amplitude 1)
+ *  With path loss (no -p), C/N0 - signal level [dB] equals this value for every satellite.
+ */
+double referenceCN0(void)
+{
+    const double path_loss_db = 20 * log10(4 * PI * reference_distance * TX_FREQUENCY / SPEED_OF_LIGHT);
+    return boresight_tx_power + max_tx_antenna_gain_db - path_loss_db + rx_GT + boltzmann_const;
+}
 
 /*! \brief Subtract two vectors of double
  *  \param[out] y Result of subtraction
@@ -221,123 +233,83 @@ static int leap_seconds(int year, int month, int day)
     return ls;
 }
 
-/*! \brief Convert a UTC date into a GPS date
- *  \param[in] t input date in UTC form
+/*! \brief Convert a calendar date in GPS time scale into a GPS time (no leap seconds)
+ *  \param[in] t input date in GPS time scale (e.g. RINEX navigation epoch)
  *  \param[out] g output date in GPS form
  */
 void date2gps(const datetime_t *t, gpstime_t *g)
 {
-    // int doy[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
-    // int ye;
-    // int de;
-    // int lpdays;
-
-    // ye = t->y - 1980;
-
-    // // Compute the number of leap days since Jan 5/Jan 6, 1980.
-    // lpdays = ye/4 + 1;
-    // if ((ye%4)==0 && t->m<=2)
-    //     lpdays--;
-
-    // // Compute the number of days elapsed since Jan 5/Jan 6, 1980.
-    // de = ye*365 + doy[t->m-1] + t->d + lpdays - 6;
-
-    // // Convert time to GPS weeks and seconds.
-    // g->week = de / 7;
-    // g->sec = (double)(de%7)*SECONDS_IN_DAY + t->hh*SECONDS_IN_HOUR
-    //     + t->mm*SECONDS_IN_MINUTE + t->sec + SECONDS_UTC_TO_GPS;
-
-    // return;
-
     int Y = t->y;
     int M = t->m;
-    int D = t->d;
     if(M <= 2) { Y -= 1; M += 12; }
-
-    double day_frac = D + (t->hh/24.0) + (t->mm/1440.0) + (t->sec/86400.0);
 
     int A = Y/100;
     int B = 2 - A + A/4;
 
-    double JD_utc = floor(365.25*(Y+4716)) + floor(30.6001*(M+1)) + day_frac + B - 1524.5;
+    // Julian day number at 00:00 of the date minus that of the GPS epoch 1980/01/06 00:00
+    long jdn = (long)floor(365.25*(Y+4716)) + (long)floor(30.6001*(M+1)) + t->d + B - 1524; // JD + 0.5
+    long days = jdn - 2444245L;
 
-    double JD_gps_epoch = 2444244.5; // 1980-01-06 00:00:00 UTC
+    double gps_sec = (double)days * SECONDS_IN_DAY
+                   + t->hh*SECONDS_IN_HOUR + t->mm*SECONDS_IN_MINUTE + t->sec;
 
-    // cumulative leap seconds
-    int ls = leap_seconds(t->y, t->m, t->d);
-
-    // GPS seconds = (JD - JD_gps) * 86400 + (TAI-UTC -19)
-    double gps_sec = (JD_utc - JD_gps_epoch) * SECONDS_IN_DAY + ls - 19;
-
-    g->week = (int)(gps_sec / 604800.0);
-    g->sec  = fmod(gps_sec, 604800.0);
+    g->week = (int)floor(gps_sec / 604800.0);
+    g->sec  = gps_sec - g->week * 604800.0;
 }
 
+/*! \brief Convert a GPS time into a calendar date in GPS time scale (no leap seconds)
+ *  \param[in] g input date in GPS form
+ *  \param[out] t output date in GPS time scale
+ */
 void gps2date(const gpstime_t *g, datetime_t *t)
 {
-    // long c,d,e,f;
-    // double gsec = round(g->sec - SECONDS_UTC_TO_GPS);
-
-    // // Convert Julian day number to calendar date
-    // c = (long)(7.0*(double)g->week + floor(gsec/86400.0)+2444245.0) + 1537;
-    // d = (long)(((double)c-122.1)/365.25);
-    // e = 365*d + d/4;
-    // f = (long)((double)(c-e)/30.6001 );
-
-    // t->d = c - e - (int)(30.6001*f);
-    // t->m = f - 1 - 12*(f/14);
-    // t->y  = d - 4715 - ((7 + t->m)/10);
-
-    // t->hh = ((int)(gsec/3600.0))%24;
-    // t->mm = ((int)(gsec/60.0))%60;
-    // t->sec = gsec - 60.0*floor(gsec/60.0);
-
-    // return;
-
     double gps_sec = g->week*604800.0 + g->sec;
+    long days = (long)floor(gps_sec / SECONDS_IN_DAY);
+    double sod = gps_sec - days * SECONDS_IN_DAY;
 
-    // GPS -> TAI
-    double tai_sec = gps_sec + 19.0;
+    // Julian day number to calendar date
+    double Z = (double)(days + 2444245L);
+    double alpha = floor((Z - 1867216.25)/36524.25);
+    double A = Z + 1 + alpha - floor(alpha/4.0);
+    double B = A + 1524;
+    double C = floor((B - 122.1)/365.25);
+    double D = floor(365.25*C);
+    double E = floor((B - D)/30.6001);
 
-    // Initial approximation: UTC = TAI - cumulative leap seconds
-    double utc_sec = tai_sec; // will subtract leap seconds iteratively
+    t->d = (int)(B - D - floor(30.6001*E));
+    t->m = (int)(E < 14 ? E - 1 : E - 13);
+    t->y = (int)(t->m > 2 ? C - 4716 : C - 4715);
 
-    int done = 0;
+    t->hh = (int)(sod / SECONDS_IN_HOUR);
+    t->mm = (int)((sod - t->hh*SECONDS_IN_HOUR) / SECONDS_IN_MINUTE);
+    t->sec = sod - t->hh*SECONDS_IN_HOUR - t->mm*SECONDS_IN_MINUTE;
+}
+
+/*! \brief Convert a UTC date into a GPS time
+ *  \param[in] t input date in UTC
+ *  \param[out] g output date in GPS form
+ */
+void utc2gps(const datetime_t *t, gpstime_t *g)
+{
+    date2gps(t, g);
+    *g = incGpsTime(*g, (double)leap_seconds(t->y, t->m, t->d)); // GPS - UTC
+}
+
+/*! \brief Convert a GPS time into a UTC date
+ *  \param[in] g input date in GPS form
+ *  \param[out] t output date in UTC
+ */
+void gps2utc(const gpstime_t *g, datetime_t *t)
+{
     int ls = 0;
-    while(!done) {
-        // Convert seconds since GPS epoch to Julian Day
-        double jd = 2444244.5 + (utc_sec / SECONDS_IN_DAY);
-
-        // Convert JD to calendar date
-        double Z = floor(jd + 0.5);
-        double F = jd + 0.5 - Z;
-
-        double alpha = floor((Z - 1867216.25)/36524.25);
-        double A = Z + 1 + alpha - floor(alpha/4.0);
-        double B = A + 1524;
-        double C = floor((B - 122.1)/365.25);
-        double D = floor(365.25*C);
-        double E = floor((B - D)/30.6001);
-
-        t->d = (int)(B - D - floor(30.6001*E) + F);
-        t->m = (int)(E < 14 ? E - 1 : E - 13);
-        t->y = (int)(t->m > 2 ? C - 4716 : C - 4715);
-
-        // Compute HH:MM:SS
-        double day_frac = F;
-        t->hh = (int)(day_frac * 24.0);
-        t->mm = (int)((day_frac*24.0 - t->hh)*60.0);
-        t->sec = ((day_frac*24.0 - t->hh)*60.0 - t->mm)*60.0;
-
-        // Check leap seconds for this date
+    for (int i = 0; i < 3; i++)
+    {
+        gpstime_t gutc = incGpsTime(*g, -(double)ls);
+        gps2date(&gutc, t);
         int new_ls = leap_seconds(t->y, t->m, t->d);
-        if(new_ls == ls) {
-            done = 1;
-        } else {
-            // adjust UTC seconds
-            utc_sec = tai_sec - new_ls;
-            ls = new_ls;
-        }
+        if (new_ls == ls)
+            break;
+        ls = new_ls;
     }
 }
 
@@ -1999,7 +1971,7 @@ int generateNavMsg(const gpstime_t g, channel_t *chan, int init)
  *  \param[out] chan Receiver channel, compute tx_antenna_gain, and azel
  *  \returns visible (1), invisible (0), or invalid (-1)
  */
-int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *receiver_pos, channel_t *chan, double lunar_pos_ecef[3])
+int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *receiver_pos, channel_t *chan)
 {
     double llh[3],neu[3];
     double pos[3],vel[3],clk[3],los[3];
@@ -2047,31 +2019,7 @@ int checkSatVisibility(const ephem_t *eph, const gpstime_t *g, const double *rec
     if (chan->azel[1] < el_earth_edge)  // Check only geometric visibility
         return 0;
 
-    // TODO: think better way
-    if (llh[2] > 3e8)
-        {
-            // FIXME: this is not right. instant los is not accurate.
-            // Check if the sc is behind of moon
-            const double radius_moon_m = GetRadiusKm(moon_) * 1000;
-            double los_from_moon_to_gps[3];
-            subVect(los_from_moon_to_gps, pos, lunar_pos_ecef);
-            double distance_sc2gps = normVect(los);
-            double distance_moon2gps = normVect(los_from_moon_to_gps);
-            double zenith_lunar_edge_rad = asin(radius_moon_m / distance_moon2gps);
-            // Check elevation only when the distance is bigger than distance to edge
-            if (distance_sc2gps > distance_moon2gps * cos(zenith_lunar_edge_rad))
-                {
-                    // NOTE: should be around 0.004453 rad.
-                    double zenith_sc_rad = acos(dotProd(los_from_moon_to_gps, los) / (distance_moon2gps * distance_sc2gps));
-                    // Behind the moon
-                    if (zenith_sc_rad < zenith_lunar_edge_rad)
-                        {
-                            // For debug
-                            printf("SC is behind the moon!\n");
-                            return 0;
-                        }
-                }
-        }
+    // NOTE: occultation by the Moon is not considered (LEO use only).
 
     return 1;  // visible
 }
@@ -2114,36 +2062,11 @@ int allocateChannel(channel_t *chan, int *allocatedSat, const ephem_t* eph, cons
         fprintf(log_file, "%lf", grx.sec);
     #endif  // NO_LOG_OUT
 
-    // FIXME: maybe this is heavy.
-    // Preparation for moon occultation check
-    double tt = ConvGPSTimeToTt(time_system, env->g->week, env->g->sec);
-    const double* lunar_pos_i = GetPositionI(moon_, tt);
-    double dcm_eci_to_ecef[9];
-    GetDcmEciToEcef(frame, tt, dcm_eci_to_ecef);
-    double lunar_pos_ecef[3];
-    for (i = 0; i < 3; i++)
-        {
-            lunar_pos_ecef[i] = dcm_eci_to_ecef[3 * i] * lunar_pos_i[0]
-                                + dcm_eci_to_ecef[3 * i + 1] * lunar_pos_i[1]
-                                + dcm_eci_to_ecef[3 * i + 2] * lunar_pos_i[2];
-        }
-    // For debug
-    // static FILE* fpt = NULL;
-    // if (fpt == NULL)
-    // 	fpt = fopen("moon_eci.csv", "w+");
-    // 	// fpt = fopen("los_moon2sat.csv", "w+");
-    // // double los_moon2sat[3];
-    // // subVect(los_moon2sat, receiver_states, lunar_pos_ecef);
-    // // double distance_from_moon = normVect(los_moon2sat);
-    // // fprintf(fpt, "%lf, %lf, %lf, %lf\n", los_moon2sat[0], los_moon2sat[1], los_moon2sat[2], distance_from_moon);
-    // fprintf(fpt, "%lf, %lf, %lf, %lf, %lf\n", tt, lunar_pos_i[0], lunar_pos_i[1], lunar_pos_i[2], normVect(lunar_pos_i));
-    // fflush(fpt);
-
     // Allocate channel
     for (sv=0; sv<MAX_SAT; sv++)
     {
         channel_t channel = {};
-        if(checkSatVisibility(&eph[sv], env->g, &(receiver_states[1]), &channel, lunar_pos_ecef) == 1)
+        if(checkSatVisibility(&eph[sv], env->g, &(receiver_states[1]), &channel) == 1)
         {
 #ifndef NO_LOG_OUT
             if (log_file != NULL)
@@ -2256,6 +2179,13 @@ int setReceiverPosition(double** receiver_states, option_t* opt)
         else
         {
             numd = readUserMotion(receiver_states, opt->umfile);
+
+            if (opt->eci_input)
+            {
+                // Convert to ECEF with the rotation angle in the 1st column, which is kept as is.
+                for (int i = 0; i < numd; i++)
+                    eci2ecef(receiver_states[i][0], &(receiver_states[i][1]), &(receiver_states[i][1]));
+            }
         }
 
         if (numd <= 0)
@@ -2308,14 +2238,15 @@ void printChannelInformation(const channel_t *chan, const double *pos)
     printf("xyz = %11.1f, %11.1f, %11.1f\n", pos[0], pos[1], pos[2]);
     xyz2llh(pos, llh);
     printf("llh = %11.6f, %11.6f, %11.1f\n", llh[0]*R2D, llh[1]*R2D, llh[2]);
-    printf("PRN    Azi   Ele PseudoRange   Ion TxGain\n");
+    printf("PRN    Azi   Ele PseudoRange   Ion TxGain  Signal[dB]\n");
     int i;
     for (i = 0; i < MAX_CHAN; i++)
     {
         const uint8_t PRN = (chan[i].sat_id >= 0) ? gps_sats[chan[i].sat_id].sat_info.PRN : 0;
         if (PRN > 0)
-            printf(" %02d %6.1f %5.1f %11.1f %5.1f %6d\n", PRN,
-                chan[i].azel[0] * R2D, chan[i].azel[1] * R2D, chan[i].rho0.d, chan[i].rho0.iono_delay, chan[i].tx_antenna_gain);
+            printf(" %02d %6.1f %5.1f %11.1f %5.1f %6d %11.2f\n", PRN,
+                chan[i].azel[0] * R2D, chan[i].azel[1] * R2D, chan[i].rho0.d, chan[i].rho0.iono_delay, chan[i].tx_antenna_gain,
+                (chan[i].gain > 0) ? 20.0 * log10((double)chan[i].gain / (double)(1 << SIGNAL_GAIN_SHIFT)) : -INFINITY);
     }
 }
 
@@ -2385,38 +2316,33 @@ bool computeObservation(channel_t* chan, const ephem_t* eph, const env_t* env, c
     chan->carr_phasestep = (int)(512 * 65536.0 * chan->f_carr * delt);
 
     // Path loss
-    double path_loss_for_sim = opt->path_loss_enable ? 20200000.0/rho.d : 1.0;
+    double path_loss_for_sim = opt->path_loss_enable ? reference_distance/rho.d : 1.0;
     double path_loss_db = 20 * log10(4 * PI * rho.d * TX_FREQUENCY / SPEED_OF_LIGHT);
 
     // Receiver antenna gain
     int ibs = (int)((90.0 - rho.azel[1] * R2D) / 5.0); // covert elevation to boresight
     double rec_ant_gain = opt->antenna_pattern_enable ? ant_pat[ibs] : 1.0;
 
-    // GPS Tx antenna gain
-    const int8_t boresight_tx_gain_db = gps_sats[chan->sat_id].antenna_gain[0][0];
-    // Normalize it to avoid the over range
-    const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - boresight_tx_gain_db) / 10.0) : 1.0;
-    static const uint8_t required_CN0 = 18; // 18 or 27 (real-time decode)
-    static const double boltzmann_const = 228.6;
-    static const double rx_antenna_gain = 15;  // Assume for this computation. 15dB 4-array, 9dB 1 patch
-    static const double rx_GT = rx_antenna_gain - 24.0;  // LNA gain 40dB, NF 1.5dB, antenna noise temperature 130 K
-    static const double boresight_tx_power = 14.5;  // averagely from GPS ACE paper.
-    double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const;
-    if (!opt->antenna_pattern_enable)
-        {
+    // GPS Tx antenna gain, normalized by the maximum gain of all the satellites to avoid the over range
+    // and to keep the difference between satellites. NOTE: chan->gain is an amplitude, so dB / 20.
+    const double normalized_tx_gain = opt->antenna_pattern_enable ? pow(10.0, (chan->tx_antenna_gain - max_tx_antenna_gain_db) / 20.0) : 1.0;
+    // Receiver antenna pattern attenuation w.r.t. boresight, applied to the signal as well
+    const double rec_ant_att_db = opt->antenna_pattern_enable ? ant_pat_db[ibs] : 0.0;
+    double rx_CN0 = boresight_tx_power + chan->tx_antenna_gain - path_loss_db + rx_GT + boltzmann_const - rec_ant_att_db;
 #ifndef NO_LOG_OUT
-            if (cn0_log != NULL)
-                fprintf(cn0_log, ",%lf", rx_CN0);
+    if (cn0_log != NULL)
+        fprintf(cn0_log, ",%lf", rx_CN0);
 #endif // NO_LOG_OUT
-            if (rx_CN0 < required_CN0)
-                {
-                    chan->gain = 0;
-                    return false;
-                }
+    // With equal power (-E), drop the satellites whose C/N0 is too low to be tracked.
+    // Otherwise the signal is attenuated according to the antenna patterns and path loss.
+    if (!opt->antenna_pattern_enable && rx_CN0 < required_CN0)
+        {
+            chan->gain = 0;
+            return false;
         }
 
-    // Signal gain
-    chan->gain = (int)(path_loss_for_sim * rec_ant_gain * normalized_tx_gain * 128.0); // scaled by 2^7
+    // Signal gain (amplitude)
+    chan->gain = (int)(path_loss_for_sim * rec_ant_gain * normalized_tx_gain * (double)(1 << SIGNAL_GAIN_SHIFT));
     return true;
 }
 
@@ -2478,9 +2404,9 @@ void computeIQacc(int *iq_acc, channel_t * chan)
         }
     }
 
-    // Scaled by 2^7
-    iq_acc[0] = (iq_acc[0] + 64) >> 7;
-    iq_acc[1] = (iq_acc[1] + 64) >> 7;
+    // Remove the scale of the signal gain
+    iq_acc[0] = (iq_acc[0] + (1 << (SIGNAL_GAIN_SHIFT - 1))) >> SIGNAL_GAIN_SHIFT;
+    iq_acc[1] = (iq_acc[1] + (1 << (SIGNAL_GAIN_SHIFT - 1))) >> SIGNAL_GAIN_SHIFT;
 }
 
 
@@ -2519,7 +2445,7 @@ void write_headers(FILE *vis_file, FILE *cn0_file)
     fprintf(cn0_file, "\n");
 }
 
-void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2], bool dump_user_pos[2])
+void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *eci_log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2], bool dump_user_pos[2])
 {
     const size_t log_dir_str_size = strlen(s->opt.log_dir);
     if (log_dir_str_size == 0) return;
@@ -2538,6 +2464,11 @@ void initialize_log_files(const sim_t *s, FILE *log_files[2], FILE *visibility_l
                 goto exit;
 
             fprintf(log_files[i], "t, gmst_sec, x, y, z, vx, vy, vz\n");
+
+            if (!open_log_file(&eci_log_files[i], s->opt.log_dir, "user_states_eci", suffix, "User states in ECI", i))
+                goto exit;
+
+            fprintf(eci_log_files[i], "t, theta_rad, x, y, z, vx, vy, vz\n");
         }
 
         if (!open_log_file(&visibility_log_files[i], s->opt.log_dir, "visibility", suffix, "Visibility", i))
@@ -2556,6 +2487,17 @@ exit:
 }
 
 
+void close_log_files(FILE *log_files[2], FILE *eci_log_files[2], FILE *visibility_log_files[2], FILE *cn0_log_files[2])
+{
+    for (uint8_t i = 0; i < 2; i++)
+    {
+        if (eci_log_files[i] != NULL) fclose(eci_log_files[i]);
+        if (visibility_log_files[i] != NULL) fclose(visibility_log_files[i]);
+        if (cn0_log_files[i] != NULL) fclose(cn0_log_files[i]);
+        if (log_files[i] != NULL) fclose(log_files[i]);
+    }
+}
+
 void log_user_position(FILE *log_file, bool enabled, double time, double *state)
 {
     if (!enabled || log_file == NULL || state == NULL)
@@ -2563,6 +2505,24 @@ void log_user_position(FILE *log_file, bool enabled, double time, double *state)
 
     fprintf(log_file, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf\n",
             time, state[0], state[1], state[2], state[3], state[4], state[5], state[6]);
+}
+
+/*! \brief Log the user state in ECI */
+/*  \param[in] grx Receiver time, used for GMST when the angle is not given by the user motion file
+ *  \param[in] state User state {angle or time, x, y, z, vx, vy, vz} in ECEF
+ *  \param[in] eci_input The 1st column of the state is the ECI rotation angle
+ */
+void log_user_position_eci(FILE *log_file, bool enabled, gpstime_t grx, const double *state, bool eci_input)
+{
+    if (!enabled || log_file == NULL || state == NULL)
+        return;
+
+    const double theta = eci_input ? state[0] : gpsTimeToGmst(grx);
+    double eci[6];
+    ecef2eci(theta, &(state[1]), eci);
+
+    fprintf(log_file, "%lf,%.15f,%lf,%lf,%lf,%lf,%lf,%lf\n",
+            grx.sec, theta, eci[0], eci[1], eci[2], eci[3], eci[4], eci[5]);
 }
 
 #ifndef _WIN32
@@ -2680,11 +2640,12 @@ void *gps_task(void *arg)
 
     // Log files
     FILE *log_files[2] = {NULL, NULL};
+    FILE *eci_log_files[2] = {NULL, NULL};
     FILE *visibility_log_files[2] = {NULL, NULL};
     FILE *cn0_log_files[2] = {NULL, NULL};
     bool dump_user_pos[2] = {false, false};
 
-    initialize_log_files(s, log_files, visibility_log_files, cn0_log_files, dump_user_pos);
+    initialize_log_files(s, log_files, eci_log_files, visibility_log_files, cn0_log_files, dump_user_pos);
 
     ////////////////////////////////////////////////////////////
     // Read options
@@ -2708,13 +2669,21 @@ void *gps_task(void *arg)
     // independent options b/w ch
     strcpy(umfile, s->opt.umfile);
 
-    // Initialize global variables for environment
-    // FIXME: better to put them into env_t?
-    time_system = TimeSystemInit();
-    earth_ = EarthInit(ConvGPSTimeToTt(time_system, g0.week, g0.sec));
-    moon_ = MoonInit(g0.week, g0.sec, EarthGravityConst(earth_));
-    frame = FrameInit(earth_, moon_, time_system);
-    InitGPSSatellite(gps_sats);
+    if (InitGPSSatellite(gps_sats))
+    {
+        printf("ERROR: Failed to read GPS satellite table / antenna patterns.\n");
+        goto exit;
+    }
+    {
+        // Truncated to int8_t as the gain of each channel (GetAntennaGain)
+        double max_gain = -INFINITY;
+        for (sv = 0; sv < MAX_SAT; sv++)
+            for (int ie = 0; ie < ANT_ELE_NUM; ie++)
+                for (int ia = 0; ia < ANT_AZI_NUM; ia++)
+                    max_gain = fmax(max_gain, gps_sats[sv].antenna_gain[ie][ia]);
+        max_tx_antenna_gain_db = (int8_t)max_gain;
+    }
+    printf("Reference C/N0 (signal level 0 dB): %.1f dB-Hz\n", referenceCN0());
 
     ////////////////////////////////////////////////////////////
     // Receiver position
@@ -2866,7 +2835,8 @@ void *gps_task(void *arg)
         t0 = tmin;
     }
 
-    printf("Start time = %4d/%02d/%02d,%02d:%02d:%02.0f (%d:%.0f)\n",
+    gps2utc(&g0, &t0);
+    printf("Start time = %4d/%02d/%02d,%02d:%02d:%02.0f UTC (GPS week %d, TOW %.0f)\n",
         t0.y, t0.m, t0.d, t0.hh, t0.mm, t0.sec, g0.week, g0.sec);
     printf("Duration = %.1f [sec]\n", ((double)numd)/10.0);
 
@@ -2967,7 +2937,7 @@ void *gps_task(void *arg)
 
     // TODO: enhance for ch2
     for (i=0; i<37; i++)
-        ant_pat[i] = pow(10.0, -ant_pat_db[i]/20.0); // FIXME: should be 10log.
+        ant_pat[i] = pow(10.0, -ant_pat_db[i]/20.0); // amplitude
 
     ////////////////////////////////////////////////////////////
     // Generate baseband signals
@@ -3068,14 +3038,18 @@ void *gps_task(void *arg)
 
         // Logging receiver position with gpstime.
         log_user_position(log_files[0], dump_user_pos[0], grx.sec, receiver_states[iumd]);
+        log_user_position_eci(eci_log_files[0], dump_user_pos[0], grx, receiver_states[iumd], s->opt.eci_input);
         if (s->ch2_enable)
+        {
             log_user_position(log_files[1], dump_user_pos[1], grx.sec, receiver_states2[iumd]);
+            log_user_position_eci(eci_log_files[1], dump_user_pos[1], grx, receiver_states2[iumd], s->opt2.eci_input);
+        }
 
 #ifndef NO_LOG_OUT
         // TODO: the log output is too frequent?
-        fprintf(cn0_log_files[0], "%lf", grx.sec);
+        if (cn0_log_files[0] != NULL) fprintf(cn0_log_files[0], "%lf", grx.sec);
         if (s->ch2_enable)
-            fprintf(cn0_log_files[1], "%lf", grx.sec);
+            if (cn0_log_files[1] != NULL) fprintf(cn0_log_files[1], "%lf", grx.sec);
 #endif  // NO_LOG_OUT
         for (i=0; i<MAX_CHAN; i++)
         {
@@ -3087,9 +3061,9 @@ void *gps_task(void *arg)
             }
         }
 #ifndef NO_LOG_OUT
-        fprintf(cn0_log_files[0], "\n");
+        if (cn0_log_files[0] != NULL) fprintf(cn0_log_files[0], "\n");
         if (s->ch2_enable)
-            fprintf(cn0_log_files[1], "\n");
+            if (cn0_log_files[1] != NULL) fprintf(cn0_log_files[1], "\n");
 #endif  // NO_LOG_OUT
 
         if (!s->fast_mode)
@@ -3201,8 +3175,8 @@ void *gps_task(void *arg)
                 (s->fast_mode && igrx % 30000 == 0)))
             {
                 printf("\n");
-                gps2date(&grx, &t0);
-                printf("%4d/%02d/%02d,%02d:%02d:%02.0f (%d:%.0f)\n",
+                gps2utc(&grx, &t0);
+                printf("%4d/%02d/%02d,%02d:%02d:%02.0f UTC (%d:%.0f)\n",
                     t0.y, t0.m, t0.d, t0.hh, t0.mm, t0.sec, grx.week, grx.sec);
                 // channel 1
                 printf("channel 1\n");
@@ -3221,20 +3195,21 @@ void *gps_task(void *arg)
         grx = incGpsTime(grx, 0.1);
         env.g = &grx;
 
-        // Update time counter
-        // printf("\rTime into run = %4.1f", subGpsTime(grx, g0));
-        // fflush(stdout);
+        // Show the progress every 1 s in real time
+        if (!s->fast_mode && iumd % 10 == 0)
+            printf("Time into run = %.0f / %.0f s\n", iumd / 10.0, numd / 10.0);
     }
-
-    goto exit;
 
 abort:
 #ifndef _WIN32
     changemode(0);
 #endif
 
-    // Done!
+    // Done! Wake up the TX task to let it transmit the rest and finish.
+    pthread_mutex_lock(&(s->gps.lock));
     s->finished = true;
+    pthread_mutex_unlock(&(s->gps.lock));
+    pthread_cond_signal(&(s->fifo_read_ready));
 
     // Free I/Q buffer
     free(iq_buff);
@@ -3250,27 +3225,15 @@ abort:
         free(receiver_states2);
     }
 
-    // Close log file
-    for (i = 0; i < 2; i++)
-    {
-        if (i == 1 && !s->ch2_enable) break;
-        fclose(visibility_log_files[i]);
-        fclose(cn0_log_files[i]);
-        if (dump_user_pos[i])
-            fclose(log_files[i]);
-    }
+    close_log_files(log_files, eci_log_files, visibility_log_files, cn0_log_files);
     return (NULL);
 
 exit:
-    // Close log file
-    for (i = 0; i < 2; i++)
-    {
-        if (i == 1 && !s->ch2_enable) break;
-        fclose(visibility_log_files[i]);
-        fclose(cn0_log_files[i]);
-        if (dump_user_pos[i])
-            fclose(log_files[i]);
-    }
+    close_log_files(log_files, eci_log_files, visibility_log_files, cn0_log_files);
+
+    // Let the caller waiting for the initialization know the failure.
+    s->gps.ready = -1;
+    pthread_cond_signal(&(s->gps.initialization_done));
 
     printf("Abort.\n");
     return (NULL);

@@ -110,9 +110,15 @@ void *tx_task(void *arg)
 		while (buffer_samples_remaining > 0) {
 
 			pthread_mutex_lock(&(s->gps.lock));
-			while (get_sample_length(s) == 0)
+			while (get_sample_length(s) == 0 && !is_finished_generation(s))
 			{
 				pthread_cond_wait(&(s->fifo_read_ready), &(s->gps.lock));
+			}
+			if (get_sample_length(s) == 0)
+			{
+				// Generation finished and the FIFO is empty.
+				pthread_mutex_unlock(&(s->gps.lock));
+				goto out;
 			}
 
 			samples_populated = fifo_read(tx_buffer_current,
@@ -141,7 +147,9 @@ void *tx_task(void *arg)
 		assert(buffer_samples_remaining == 0);
 
 		// If there were no errors, transmit the data buffer.
-		bladerf_sync_tx(s->tx.dev, s->tx.buffer, SAMPLES_PER_BUFFER, NULL, TIMEOUT_MS);
+		int status = bladerf_sync_tx(s->tx.dev, s->tx.buffer, SAMPLES_PER_BUFFER, NULL, TIMEOUT_MS);
+		if (status != 0)
+			fprintf(stderr, "TX failed: %s\n", bladerf_strerror(status));
 		// TODO: what is this if sentence for?
 		if (is_fifo_write_ready(s)) {
 			/*
@@ -202,18 +210,21 @@ void usage(void)
 		"  -g <nmea_gga>    NMEA GGA stream (dynamic mode)\n"
 		"  -l <location>    Lat,Lon,Hgt (static mode) e.g. 35.274,137.014,100\n"
 		"  -L <location>    Lat,Lon,Hgt (static mode) of Ch2 e.g. 35.274,137.014,100\n"
-		"  -t <date,time>   Scenario start time YYYY/MM/DD,hh:mm:ss\n"
-		"  -T <date,time>   Overwrite TOC and TOE to scenario start time\n"
+		"  -t <date,time>   Scenario start time in UTC YYYY/MM/DD,hh:mm:ss\n"
+		"  -T <date,time>   Overwrite TOC and TOE to scenario start time in UTC (or 'now')\n"
 		"  -d <duration>    Duration [sec] (max: %.0f)\n"
 		"  -x <XB number>   Enable expansion board, e.g. '-x 200' for XB200\n"
+		"  -b <device>      bladeRF serial number (prefix) or device string, e.g. 636ee0 or *:serial=636ee0\n"
+		"  -D <data_dir>    Directory of gps_table.csv and antenna/ (default: $BLADEGPS_DATA_DIR or ./gnss)\n"
 		"  -a <tx_gain>     TX Gain (default: %d)\n"
 		"  -r <azi,ele>     Rx antenna attitude in degree (default: azi=0, ele=90)\n"
 		"  -R <azi,ele>     Rx antenna attitude in degree of Ch2 (default: same as Ch1)\n"
 		"  -i               Interactive mode: North='%c', South='%c', East='%c', West='%c'\n"
 		"  -I               Disable ionospheric delay for spacecraft scenario\n"
-		"  -E               Equal distribution of rx and tx antenna pattern\n"
+		"  -E               Equal signal power for all satellites (no antenna patterns, drop below 18 dB-Hz)\n"
 		"  -p               Disable path loss and hold power level constant\n"
-		"  -f               Fast option, run only simulation part as fast as possible without generating IQ.\n"
+		"  -j               User motion files are in ECI: angle[rad],x,y,z,vx,vy,vz (z-rotation by angle from ECEF)\n"
+		"  -f               Fast option, run only simulation part as fast as possible without generating IQ (no device needed).\n"
 		"  -v               Verbosity option\n",
 		((double)USER_MOTION_SIZE)/10.0,
 		TX_GAIN,
@@ -222,12 +233,16 @@ void usage(void)
 	return;
 }
 
-#define bladegps_version_helper(x) #x
-#define bladegps_version(x) bladegps_version_helper(x)
+#ifndef GIT_COMMIT_ID
+#define GIT_COMMIT_ID "unknown"
+#endif
+#ifndef GIT_COMMIT_DATE
+#define GIT_COMMIT_DATE ""
+#endif
 
 static void bladegps_opening()
 {
-	printf("\nbladeGPS is now starting. commit=%.8s (%s)\n", bladegps_version(GIT_COMMIT_ID) +7, bladegps_version(GIT_COMMIT_DATE));
+	printf("\nbladeGPS is now starting. commit=%s (%s)\n", GIT_COMMIT_ID, GIT_COMMIT_DATE);
 }
 
 // sim_t *simp = NULL;
@@ -243,7 +258,8 @@ static void bladegps_opening()
 int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 {
 	sim_t s = {0};
-	// char *devstr = NULL;
+	char *devstr = NULL;
+	const bool own_dev = (dev == NULL); // Open/close the device here unless the caller owns it.
 	int xb_board = 0;
 
 	int result;
@@ -261,6 +277,8 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 		usage();
 		exit(1);
 	}
+	// Line buffered even when the output is piped (e.g. to tee in the scripts)
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	bladegps_opening();
 
 	// if (signal(SIGINT, bladeGPS_signal_handler) == SIG_ERR &&
@@ -289,12 +307,12 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.opt.antenna_pattern_enable = true;
 	s.opt.path_loss_enable = TRUE;
 	s.opt.rec_ant_dir[0] = 0.0;
-	s.opt.rec_ant_dir[0] = 90.0 *D2R;
+	s.opt.rec_ant_dir[1] = 90.0 *D2R;
 	option_t opt2 = s.opt;
 	s.ch2_enable = false;
 	s.fast_mode = false;
 
-	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:iIEpfv"))!=-1)
+	while ((result=getopt(argc,argv,":e:y:u:U:s:g:l:L:T:t:d:x:a:r:R:b:D:iIEpfjv"))!=-1)
 	{
 		switch (result)
 		{
@@ -360,7 +378,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 				t0.mm = gmt->tm_min;
 				t0.sec = (double)gmt->tm_sec;
 
-				date2gps(&t0, &s.opt.g0);
+				utc2gps(&t0, &s.opt.g0);
 
 				break;
 			}
@@ -373,7 +391,7 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 				exit(1);
 			}
 			t0.sec = floor(t0.sec);
-			date2gps(&t0, &s.opt.g0);
+			utc2gps(&t0, &s.opt.g0);
 			break;
 		case 'd':
 			duration = atof(optarg);
@@ -386,6 +404,20 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 			break;
 		case 'x':
 			xb_board=atoi(optarg);
+			break;
+		case 'b':
+			// A bare serial number (or its prefix) is accepted as well as a device string.
+			if (strchr(optarg, ':') == NULL)
+			{
+				static char devstr_serial[MAX_CHAR];
+				snprintf(devstr_serial, sizeof(devstr_serial), "*:serial=%s", optarg);
+				devstr = devstr_serial;
+			}
+			else
+				devstr = optarg;
+			break;
+		case 'D':
+			SetGnssDataDir(optarg);
 			break;
 		case 'a':
 			tx_gain = atoi(optarg);
@@ -421,6 +453,10 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 			break;
 		case 'f':
 			s.fast_mode = true;
+			break;
+		case 'j':
+			s.opt.eci_input = true;
+			opt2.eci_input = true;
 			break;
 		case 'v':
 			s.opt.verb = TRUE;
@@ -462,8 +498,44 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	s.tx.dev = dev;
 	s.status = 0;
 
+	if (s.fast_mode)
+	{
+		// Simulation only. No IQ samples are generated, so the device is not used.
+		if (dev != NULL)
+			bladerf_get_sample_rate(dev, tx_channel, &tx_samplerate);
+		num_iq_samples = (tx_samplerate / 10);
+		fifo_length = s.ch2_enable ? (num_iq_samples * 2 * 2) : (num_iq_samples * 2);
+
+		s.status = start_gps_task(&s);
+		if (s.status < 0) {
+			fprintf(stderr, "Failed to start GPS task.\n");
+			return(1);
+		}
+		pthread_join(s.gps.thread, NULL);
+		printf("\nDone!\n");
+		return(s.gps.ready < 0 ? 1 : 0);
+	}
+
+	if (own_dev)
+	{
+		printf("Opening device...\n");
+		s.status = bladerf_open(&s.tx.dev, devstr);
+		if (s.status != 0) {
+			fprintf(stderr, "Failed to open device: %s\n", bladerf_strerror(s.status));
+			s.tx.dev = NULL;
+			goto out;
+		}
+
+		s.status = bladerf_set_sample_rate(s.tx.dev, tx_channel, TX_SAMPLERATE, NULL);
+		if (s.status != 0) {
+			fprintf(stderr, "Failed to set TX sample rate: %s\n", bladerf_strerror(s.status));
+			goto out;
+		}
+	}
+
 	// NOTE: only checking of ch1 because both are the same.
-	// Get sample rate for buffer size.
+	// Get sample rate for buffer size. When the device is given by the caller,
+	// the sample rate set by the caller (e.g. the same as the receiver) is used.
 	s.status = bladerf_get_sample_rate(s.tx.dev, tx_channel, &tx_samplerate);
 	if (s.status != 0) {
 		fprintf(stderr, "Failed to get TX sample rate: %s\n", bladerf_strerror(s.status));
@@ -496,13 +568,6 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 
 	// Initializing device.
 	printf("Initializing device...\n");
-	// printf("Opening and initializing device...\n");
-
-	// s.status = bladerf_open(&s.tx.dev, devstr);
-	// if (s.status != 0) {
-	// 	fprintf(stderr, "Failed to open device: %s\n", bladerf_strerror(s.status));
-	// 	goto out;
-	// }
 
     // FIXME: not used currently, so not set for the ch2 even if the ch2 is used.
 	if(xb_board == 200) {
@@ -555,16 +620,6 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 	else {
 		printf("TX frequency: %u Hz\n", TX_FREQUENCY);
 	}
-
-	// Not set sample rate here, use same value as the receiver.
-	// s.status = bladerf_set_sample_rate(s.tx.dev, tx_channel, TX_SAMPLERATE, NULL);
-	// if (s.status != 0) {
-	// 	fprintf(stderr, "Failed to set TX sample rate: %s\n", bladerf_strerror(s.status));
-	// 	goto out;
-	// }
-	// else {
-	// 	printf("TX sample rate: %u sps\n", TX_SAMPLERATE);
-	// }
 
 	// NOTE: set bandwidth only on tx ch1 even though using both channels,
 	// because of the same reason as frequency.
@@ -632,6 +687,12 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 		pthread_cond_wait(&(s.gps.initialization_done), &(s.tx.lock));
 	pthread_mutex_unlock(&(s.tx.lock));
 
+	if (s.gps.ready < 0) {
+		fprintf(stderr, "GPS task failed to initialize.\n");
+		s.status = -1;
+		goto out;
+	}
+
 	// Fulfill the FIFO.
 	if (is_fifo_write_ready(&s))
 		pthread_cond_signal(&(s.fifo_write_ready));
@@ -681,6 +742,9 @@ int bladegps_main(struct bladerf *dev, int argc, char *argv[])
 
 	// Waiting for TX task to complete.
 	pthread_join(s.tx.thread, NULL);
+
+	// The samples queued in libbladeRF are still being transmitted. Wait for them before disabling TX.
+	usleep((useconds_t)((double)NUM_BUFFERS * SAMPLES_PER_BUFFER / tx_samplerate * 1e6) + 100000);
 	printf("\nDone!\n");
 
 	// Disable TX module and shut down underlying TX stream.
@@ -703,11 +767,16 @@ out:
 
 	if (s.fifo != NULL)
 		free(s.fifo);
-	bladerf_set_gain(s.tx.dev, BLADERF_CHANNEL_TX(0), -22);
-	printf("Set TX1 gain at minimum level.\n");
 
-	printf("Closing device...\n");
-	bladerf_close(s.tx.dev);
+	if (s.tx.dev != NULL) {
+		bladerf_set_gain(s.tx.dev, BLADERF_CHANNEL_TX(0), -22);
+		printf("Set TX1 gain at minimum level.\n");
 
-	return(0);
+		if (own_dev) {
+			printf("Closing device...\n");
+			bladerf_close(s.tx.dev);
+		}
+	}
+
+	return(s.status == 0 ? 0 : 1);
 }
